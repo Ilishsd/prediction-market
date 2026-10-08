@@ -1,0 +1,659 @@
+package marketshandlers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+
+	"socialpredict/handlers"
+	"socialpredict/handlers/markets/dto"
+	dmarkets "socialpredict/internal/domain/markets"
+	authsvc "socialpredict/internal/service/auth"
+	"socialpredict/logger"
+	"socialpredict/security"
+
+	"github.com/gorilla/mux"
+)
+
+// Service defines the interface for the markets domain service
+type Service interface {
+	CreateMarket(ctx context.Context, req dmarkets.MarketCreateRequest, creatorUsername string) (*dmarkets.Market, error)
+	SetCustomLabels(ctx context.Context, marketID int64, yesLabel, noLabel string) error
+	GetMarket(ctx context.Context, id int64) (*dmarkets.Market, error)
+	ListMarkets(ctx context.Context, filters dmarkets.ListFilters) ([]*dmarkets.Market, error)
+	GetMarketDetails(ctx context.Context, marketID int64) (*dmarkets.MarketOverview, error)
+	SearchMarkets(ctx context.Context, query string, filters dmarkets.SearchFilters) (*dmarkets.SearchResults, error)
+	ResolveMarket(ctx context.Context, marketID int64, resolution string, username string) error
+	ListByStatus(ctx context.Context, status string, p dmarkets.Page) ([]*dmarkets.Market, error)
+	GetMarketLeaderboard(ctx context.Context, marketID int64, p dmarkets.Page) ([]*dmarkets.LeaderboardRow, error)
+	ProjectProbability(ctx context.Context, req dmarkets.ProbabilityProjectionRequest) (*dmarkets.ProbabilityProjection, error)
+}
+
+// Handler handles HTTP requests for markets
+type Handler struct {
+	service         Service
+	auth            authsvc.Authenticator
+	securityService *security.SecurityService
+	invalidator     readModelInvalidator
+}
+
+type readModelInvalidator interface {
+	InvalidateAfterMarketTransaction(ctx context.Context, username string, marketID int64, reason string) error
+}
+
+type marketLeaderboardReadModelService interface {
+	GetMarketLeaderboardReadModel(ctx context.Context, marketID int64, p dmarkets.Page) (*dmarkets.MarketLeaderboardSnapshot, error)
+	RefreshMarketLeaderboardSnapshot(ctx context.Context, marketID int64) (*dmarkets.MarketLeaderboardSnapshot, error)
+}
+
+// NewHandler creates a new markets handler
+func NewHandler(service Service, auth authsvc.Authenticator, securityService *security.SecurityService) *Handler {
+	return &Handler{
+		service:         service,
+		auth:            auth,
+		securityService: securityService,
+	}
+}
+
+// SetReadModelInvalidator wires optional post-mutation display read-model
+// invalidation without making it part of the market transaction service.
+func (h *Handler) SetReadModelInvalidator(invalidator readModelInvalidator) {
+	h.invalidator = invalidator
+}
+
+// CreateMarket handles POST /markets
+func (h *Handler) CreateMarket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	if h.auth == nil {
+		writeInternalError(w)
+		return
+	}
+
+	user, httperr := h.auth.CurrentUser(r)
+	if httperr != nil {
+		writeAuthError(w, httperr)
+		return
+	}
+
+	var req dto.CreateMarketRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	if h.securityService == nil || h.securityService.Sanitizer == nil {
+		writeInternalError(w)
+		return
+	}
+	sanitized, sanitizeErr := sanitizeMarketRequest(h.securityService, req)
+	if sanitizeErr != nil {
+		writeInvalidRequest(w)
+		return
+	}
+	req = sanitized
+
+	createReq := dmarkets.MarketCreateRequest{
+		QuestionTitle:      req.QuestionTitle,
+		Description:        req.Description,
+		OutcomeType:        req.OutcomeType,
+		ResolutionDateTime: req.ResolutionDateTime,
+		YesLabel:           req.YesLabel,
+		NoLabel:            req.NoLabel,
+		TagSlugs:           req.TagSlugs,
+	}
+
+	market, err := h.service.CreateMarket(r.Context(), createReq, user.Username)
+	if err != nil {
+		writeCreateError(w, err)
+		return
+	}
+
+	if h.invalidator != nil {
+		if err := h.invalidator.InvalidateAfterMarketTransaction(r.Context(), user.Username, market.ID, "market_created"); err != nil {
+			logger.LogError("CreateMarket", "InvalidateReadModels", err)
+		}
+	}
+
+	response := marketToResponse(market)
+
+	_ = writeJSON(w, http.StatusCreated, response)
+}
+
+// UpdateLabels handles PUT /markets/{id}/labels
+func (h *Handler) UpdateLabels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	// Parse market ID from URL
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	if idStr == "" {
+		writeInvalidRequest(w)
+		return
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	// Parse request body
+	var req dto.UpdateLabelsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	// Call service
+	if err := h.service.SetCustomLabels(r.Context(), id, req.YesLabel, req.NoLabel); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	// Send success response
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GetMarket handles GET /markets/{id}
+func (h *Handler) GetMarket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	// Parse market ID from URL
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	if idStr == "" {
+		writeInvalidRequest(w)
+		return
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	// Call service
+	market, err := h.service.GetMarket(r.Context(), id)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	// Convert to response DTO
+	response := marketToResponse(market)
+
+	// Send response
+	_ = writeJSON(w, http.StatusOK, response)
+}
+
+// ListMarkets handles GET /markets
+func (h *Handler) ListMarkets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	params, err := parseListMarketsParams(r)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	var markets []*dmarkets.Market
+	if params.status != "" && params.filters.CreatedBy == "" && params.filters.TagSlug == "" {
+		page := dmarkets.Page{Limit: params.limit, Offset: params.offset}
+		markets, err = h.service.ListByStatus(r.Context(), params.status, page)
+	} else {
+		markets, err = h.service.ListMarkets(r.Context(), params.filters)
+	}
+	if err != nil {
+		if isRequestCanceled(err) {
+			return
+		}
+		logger.LogError("ListMarkets", "FetchMarkets", fmt.Errorf("request_id=%s status=%s created_by=%s limit=%d offset=%d: %w",
+			logger.RequestIDFromContext(r.Context()),
+			params.status,
+			params.filters.CreatedBy,
+			params.limit,
+			params.offset,
+			err,
+		))
+		writeListError(w, err)
+		return
+	}
+
+	overviews, err := buildMarketOverviewResponses(r.Context(), h.service, markets)
+	if err != nil {
+		if isRequestCanceled(err) {
+			return
+		}
+		logger.LogError("ListMarkets", "BuildMarketOverviewResponses", fmt.Errorf("request_id=%s markets_count=%d: %w",
+			logger.RequestIDFromContext(r.Context()),
+			len(markets),
+			err,
+		))
+		writeInternalError(w)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, dto.ListMarketsResponse{
+		Markets: overviews,
+		Total:   len(overviews),
+	})
+}
+
+// SearchMarkets handles GET /markets/search
+func (h *Handler) SearchMarkets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if h.securityService == nil || h.securityService.Sanitizer == nil {
+		writeInternalError(w)
+		return
+	}
+
+	params, err := h.parseSearchParams(r)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	searchResults, err := h.service.SearchMarkets(r.Context(), params.Query, params.Filters)
+	if err != nil {
+		if isRequestCanceled(err) {
+			return
+		}
+		logger.LogError("SearchMarkets", "SearchMarkets", err)
+		writeListError(w, err)
+		return
+	}
+
+	response, buildErr := h.buildSearchResponse(r, searchResults)
+	if buildErr != nil {
+		if isRequestCanceled(buildErr) {
+			return
+		}
+		logger.LogError("SearchMarkets", "BuildSearchResponse", buildErr)
+		writeInternalError(w)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, response)
+}
+
+// ResolveMarket handles POST /markets/{id}/resolve
+func (h *Handler) ResolveMarket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	if idStr == "" {
+		writeInvalidRequest(w)
+		return
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	if h.auth == nil {
+		writeInternalError(w)
+		return
+	}
+
+	user, httperr := h.auth.CurrentUser(r)
+	if httperr != nil {
+		writeAuthError(w, httperr)
+		return
+	}
+
+	var req dto.ResolveMarketRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	if err := h.service.ResolveMarket(r.Context(), id, req.Resolution, user.Username); err != nil {
+		writeResolveErrorResponse(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+	if h.invalidator != nil {
+		if err := h.invalidator.InvalidateAfterMarketTransaction(r.Context(), user.Username, id, "market_resolved"); err != nil {
+			logger.LogError("ResolveMarket", "InvalidateReadModels", err)
+		}
+	}
+}
+
+// ListByStatus handles GET /markets/status/{status}
+func (h *Handler) ListByStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	statusValue, err := parseStatusFromRequest(r)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	page := parsePagination(r, 100)
+
+	markets, err := h.fetchMarketsByStatus(r.Context(), statusValue, page)
+	if err != nil {
+		if isRequestCanceled(err) {
+			return
+		}
+		logger.LogError("ListMarketsByStatus", "FetchMarketsByStatus", err)
+		writeListError(w, err)
+		return
+	}
+
+	overviews, err := buildMarketOverviewResponses(r.Context(), h.service, markets)
+	if err != nil {
+		if isRequestCanceled(err) {
+			return
+		}
+		logger.LogError("ListMarketsByStatus", "BuildMarketOverviewResponses", err)
+		writeInternalError(w)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, dto.ListMarketsResponse{
+		Markets: overviews,
+		Total:   len(overviews),
+	})
+}
+
+// GetDetails handles GET /markets/{id} with full market details
+func (h *Handler) GetDetails(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	if idStr == "" {
+		writeInvalidRequest(w)
+		return
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	details, err := h.service.GetMarketDetails(r.Context(), id)
+	if err != nil {
+		writeDetailsError(w, err)
+		return
+	}
+
+	response := marketDetailsToResponse(r.Context(), h.service, details)
+
+	_ = writeJSON(w, http.StatusOK, response)
+}
+
+// MarketLeaderboard handles GET /markets/{id}/leaderboard
+func (h *Handler) MarketLeaderboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	id, err := parseMarketIDFromRequest(r)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	page := parsePagination(r, 100)
+
+	var leaderboard []*dmarkets.LeaderboardRow
+	var freshness *dto.Freshness
+	if snapshot, snapshotErr := h.marketLeaderboardReadModel(r.Context(), id, page); snapshotErr == nil && snapshot != nil {
+		leaderboard = snapshot.Rows
+		freshnessResponse := readModelFreshnessToResponse(snapshot.Freshness())
+		freshness = &freshnessResponse
+	} else {
+		if snapshotErr != nil {
+			logger.LogError("MarketLeaderboard", "GetMarketLeaderboardReadModel", snapshotErr)
+		}
+		var err error
+		leaderboard, err = h.service.GetMarketLeaderboard(r.Context(), id, page)
+		if err != nil {
+			writeLeaderboardError(w, err)
+			return
+		}
+	}
+
+	leaderRows := buildLeaderboardRows(leaderboard)
+
+	response := dto.LeaderboardResponse{
+		MarketID:    id,
+		Leaderboard: leaderRows,
+		Total:       len(leaderRows),
+		Freshness:   freshness,
+	}
+
+	_ = handlers.WriteResult(w, http.StatusOK, response)
+}
+
+func (h *Handler) marketLeaderboardReadModel(ctx context.Context, marketID int64, page dmarkets.Page) (*dmarkets.MarketLeaderboardSnapshot, error) {
+	service, ok := h.service.(marketLeaderboardReadModelService)
+	if !ok {
+		return nil, nil
+	}
+
+	snapshot, err := service.GetMarketLeaderboardReadModel(ctx, marketID, page)
+	if err != nil {
+		return nil, err
+	}
+
+	if snapshot == nil {
+		if _, refreshErr := service.RefreshMarketLeaderboardSnapshot(ctx, marketID); refreshErr != nil {
+			return nil, refreshErr
+		}
+		snapshot, err = service.GetMarketLeaderboardReadModel(ctx, marketID, page)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return snapshot, nil
+}
+
+// ProjectProbability handles GET /markets/{id}/projection
+func (h *Handler) ProjectProbability(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	marketID, err := parseMarketIDFromRequest(r)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	amount, outcome, err := parseProjectionQuery(r)
+	if err != nil {
+		writeInvalidRequest(w)
+		return
+	}
+
+	projectionReq := dmarkets.ProbabilityProjectionRequest{
+		MarketID: marketID,
+		Amount:   amount,
+		Outcome:  outcome,
+	}
+
+	projection, err := h.service.ProjectProbability(r.Context(), projectionReq)
+	if err != nil {
+		writeProjectionError(w, err)
+		return
+	}
+
+	response := dto.ProbabilityProjectionResponse{
+		MarketID:             marketID,
+		CurrentProbability:   projection.CurrentProbability,
+		ProjectedProbability: projection.ProjectedProbability,
+		Amount:               amount,
+		Outcome:              outcome,
+	}
+
+	_ = writeJSON(w, http.StatusOK, response)
+}
+
+// handleError maps domain errors to HTTP responses
+func (h *Handler) handleError(w http.ResponseWriter, err error) {
+	writeMarketActionError(w, err)
+}
+
+func parseStatusFromRequest(r *http.Request) (string, error) {
+	vars := mux.Vars(r)
+	if vars["status"] == "" {
+		return "", errors.New("Status is required")
+	}
+	return normalizeStatusParam(vars["status"])
+}
+
+func parsePagination(r *http.Request, defaultLimit int) dmarkets.Page {
+	limit := defaultLimit
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if parsedOffset, err := strconv.Atoi(offsetStr); err == nil && parsedOffset >= 0 {
+			offset = parsedOffset
+		}
+	}
+
+	return dmarkets.Page{
+		Limit:  limit,
+		Offset: offset,
+	}
+}
+
+func (h *Handler) fetchMarketsByStatus(ctx context.Context, statusValue string, page dmarkets.Page) ([]*dmarkets.Market, error) {
+	if statusValue == "" {
+		filters := dmarkets.ListFilters{
+			Status: "",
+			Limit:  page.Limit,
+			Offset: page.Offset,
+		}
+		return h.service.ListMarkets(ctx, filters)
+	}
+	return h.service.ListByStatus(ctx, statusValue, page)
+}
+
+func parseMarketIDFromRequest(r *http.Request) (int64, error) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	if idStr == "" {
+		return 0, errors.New("Market ID is required")
+	}
+
+	return strconv.ParseInt(idStr, 10, 64)
+}
+
+func parseProjectionQuery(r *http.Request) (int64, string, error) {
+	amount, err := strconv.ParseInt(r.URL.Query().Get("amount"), 10, 64)
+	if err != nil {
+		return 0, "", err
+	}
+
+	outcome := r.URL.Query().Get("outcome")
+	if outcome == "" {
+		return 0, "", errors.New("outcome is required")
+	}
+
+	return amount, outcome, nil
+}
+
+func buildLeaderboardRows(leaderboard []*dmarkets.LeaderboardRow) []dto.LeaderboardRow {
+	if len(leaderboard) == 0 {
+		return []dto.LeaderboardRow{}
+	}
+
+	leaderRows := make([]dto.LeaderboardRow, 0, len(leaderboard))
+	for _, row := range leaderboard {
+		leaderRows = append(leaderRows, dto.LeaderboardRow{
+			Username:       row.Username,
+			Profit:         row.Profit,
+			CurrentValue:   row.CurrentValue,
+			TotalSpent:     row.TotalSpent,
+			Position:       row.Position,
+			YesSharesOwned: row.YesSharesOwned,
+			NoSharesOwned:  row.NoSharesOwned,
+			Rank:           row.Rank,
+		})
+	}
+	return leaderRows
+}
+
+type searchParams struct {
+	Query   string
+	Filters dmarkets.SearchFilters
+}
+
+func (h *Handler) parseSearchParams(r *http.Request) (searchParams, error) {
+	params, parseErr := parseSearchRequest(r, h.securityService)
+	if parseErr != nil {
+		return searchParams{}, errors.New(parseErr.message)
+	}
+	return searchParams{
+		Query:   params.query,
+		Filters: params.filters,
+	}, nil
+}
+
+func (h *Handler) buildSearchResponse(r *http.Request, searchResults *dmarkets.SearchResults) (dto.SearchResponse, error) {
+	primaryOverviews, err := buildMarketOverviewResponses(r.Context(), h.service, searchResults.PrimaryResults)
+	if err != nil {
+		return dto.SearchResponse{}, err
+	}
+
+	fallbackOverviews, err := buildMarketOverviewResponses(r.Context(), h.service, searchResults.FallbackResults)
+	if err != nil {
+		return dto.SearchResponse{}, err
+	}
+
+	return dto.SearchResponse{
+		PrimaryResults:  primaryOverviews,
+		FallbackResults: fallbackOverviews,
+		Query:           searchResults.Query,
+		PrimaryStatus:   searchResults.PrimaryStatus,
+		PrimaryCount:    searchResults.PrimaryCount,
+		FallbackCount:   searchResults.FallbackCount,
+		TotalCount:      searchResults.TotalCount,
+		FallbackUsed:    searchResults.FallbackUsed,
+	}, nil
+}

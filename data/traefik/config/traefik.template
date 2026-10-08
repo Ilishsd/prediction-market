@@ -1,0 +1,36 @@
+log:
+  filePath: "/logs/error.log"
+  format: json
+  level: WARN
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+    asDefault: true
+    http:
+      tls:
+        certresolver: letsencrypt
+
+providers:
+  docker:
+    # Traefik owns the public host and TLS edge. Path publishing for backend-owned
+    # /health, /readyz, /ops/status, /swagger/, and /openapi.yaml is explicit in nginx.
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: socialpredict_external_network
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${EMAIL}
+      storage: /acme.json
+      caServer: https://acme-v02.api.letsencrypt.org/directory
+      httpChallenge:
+        entrypoint: web

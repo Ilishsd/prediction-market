@@ -1,0 +1,36 @@
+economics:
+  marketcreation:
+    initialMarketProbability: 0.5
+    initialMarketSubsidization: 10
+    initialMarketYes: 0
+    initialMarketNo: 0
+    minimumFutureHours: 1.0
+  marketincentives:
+    createMarketCost: 10
+    traderBonus: 1
+    multipleChoiceBinary:
+      addAnswerCost: 2
+      softAnswerReviewThreshold: 12
+      hardAnswerSafetyCap: 50
+  user:
+    initialAccountBalance: 0
+    maximumDebtAllowed: 500
+  betting:
+    minimumBet: 1
+    maxDustPerSale: 1
+    betFees:
+      initialBetFee: 1
+      buySharesFee: 0
+      sellSharesFee: 0
+
+frontend:
+  charts:
+    sigFigs: 2
+
+game:
+  mode: moderator
+  moderation:
+    marketApprovalRequired: true
+    moderatorCanTrade: true
+    moderatorCanTradeOwnMarkets: false
+    adminCanYankMarkets: true

@@ -1,0 +1,364 @@
+---
+title: Logging and Observability
+document_type: production-notes
+domain: backend
+author: Patrick Delaney
+updated_at: 2026-05-12T00:00:00Z
+updated_at_display: "Tuesday, May 12, 2026"
+update_reason: "Clarify the canonical production request-boundary observability chain."
+status: active
+---
+
+# Logging and Observability
+
+## Update Summary
+
+This note was updated on Saturday, April 25, 2026 to replace an older greenfield observability-platform plan with guidance that matches the current SocialPredict backend, the active design-plan posture, and the package-ownership decision to standardize on `backend/logger`.
+
+On Thursday, April 30, 2026, the health/readiness split called out by this note was finished for the serving path: `/health` now reports liveness, and `/readyz` reports readiness plus database availability.
+
+On Tuesday, May 12, 2026, the production request-boundary ownership was clarified: server wiring uses `security.RequestBoundaryMiddlewareWithProxyTrust` for request IDs, trace correlation, panic recovery, and completion logs, then wraps it with `OperationalMetrics.Middleware` for the first app-owned request-failure counter. The older `logger.RequestLoggingMiddleware` remains compatibility/test support and should not be reintroduced into production server wiring.
+
+| Topic | Prior to April 25, 2026 | After April 25, 2026 |
+| --- | --- | --- |
+| Core framing | Treated logging and observability as a new platform to build from scratch | Treats logging and observability as operational runtime boundaries to harden incrementally |
+| Package direction | Proposed new `logging/` and `observability/` package structure | Standardize on `backend/logger`, deprecate and delete `backend/logging` |
+| Telemetry model | Left the correlation and export model vague | Uses OpenTelemetry as the canonical telemetry model while keeping `backend/logger` as the app-facing adapter |
+| Current-state accuracy | Claimed health and metrics primitives were missing | Acknowledges existing `/health` and `/v0/system/metrics` routes in the live backend |
+| Sequencing | Tried to introduce structured logging, metrics, health, tracing, and aggregation all at once | Unify one logging package first, then improve health/readiness, then add metrics and tracing in controlled slices |
+| HA posture | Optimized for feature breadth first | Optimizes for deterministic runtime behavior, low-risk rollout, safe redaction, and operational clarity |
+
+## Executive Direction
+
+SocialPredict should treat logging and observability as distinct operational concerns at the runtime boundary, with OpenTelemetry as the telemetry model and correlation vocabulary rather than as a direct replacement for the backend's owned logger adapter.
+
+The backend direction is:
+
+1. Standardize on one logging package: `backend/logger`
+2. Deprecate and delete `backend/logging`
+3. Keep `backend/logger` as the application-facing runtime/infrastructure adapter, not a domain concern and not a direct SDK leak
+4. Use OpenTelemetry semantic conventions, trace correlation, and OTLP or Collector export as the target telemetry direction
+5. Harden existing health and metrics surfaces before inventing new subsystems
+6. Add richer metrics and tracing only after package ownership and log vocabulary are stable
+
+For a high-availability, fault-tolerant, enterprise-ready system, the backend should prefer:
+
+- deterministic startup and shutdown logs
+- stable field and message vocabulary
+- stdout/stderr-first emission suitable for container and process aggregation
+- request/correlation information at middleware and runtime boundaries
+- explicit health/readiness semantics
+- safe redaction and no secret leakage
+- a telemetry path that can evolve toward OTLP and Collector export without rewriting business code
+
+This note explicitly rejects creating a second backend logging dialect, a new top-level `observability/` mega-tree, or treating any current stdout exporter format as the production contract before ownership is unified.
+
+## Why This Matters
+
+Two logging packages mean two competing models of backend runtime truth. That increases migration cost, confuses conventions, and makes later observability work harder instead of easier.
+
+For high availability and fault tolerance, observability has to support:
+
+- fast diagnosis during deploy and restart events
+- consistent runtime behavior across replicas
+- clear health and readiness semantics for orchestration
+- low-risk operational rollout
+- safe production logging that never emits secrets or uncontrolled dumps
+
+That requires one owned logging package, one migration direction, and one current-state document.
+
+## Current Code Snapshot
+
+As of 2026-04-25, the backend already has partial logging and observability primitives, but they are split and inconsistent.
+
+### Logging packages are duplicated
+
+The backend currently contains two overlapping packages:
+
+```text
+backend/
+├── logger/
+│   ├── simplelogging.go
+│   ├── simplelogging_test.go
+│   └── README_SIMPLELOGGING.md
+└── logging/
+    ├── loggingutils.go
+    └── mocklogging.go
+```
+
+`backend/logger` is the stronger current package:
+
+- it has a concrete implementation in [simplelogging.go](/workspace/socialpredict/backend/logger/simplelogging.go)
+- it has tests in [simplelogging_test.go](/workspace/socialpredict/backend/logger/simplelogging_test.go)
+- it has repo-local usage guidance in [README_SIMPLELOGGING.md](/workspace/socialpredict/backend/logger/README_SIMPLELOGGING.md)
+
+`backend/logging` is legacy overlap:
+
+- it provides a thin wrapper and ad hoc debug helpers in [loggingutils.go](/workspace/socialpredict/backend/logging/loggingutils.go)
+- it includes a mock in [mocklogging.go](/workspace/socialpredict/backend/logging/mocklogging.go)
+- it no longer has active non-test imports after the retired standalone resolve-market handler was removed
+
+### `backend/logger` is the live standardization target
+
+Current `backend/logger` usage already exists in live backend code, for example:
+
+- [changepassword.go](/workspace/socialpredict/backend/handlers/users/changepassword.go)
+- [20251013_080000_core_models.go](/workspace/socialpredict/backend/migration/migrations/20251013_080000_core_models.go)
+
+That makes `backend/logger` the right package to standardize around.
+
+### Health and metrics are not starting from zero
+
+The current note used to claim that health and metrics primitives did not exist. That is no longer true.
+
+The backend already serves:
+
+- `/health` via [server.go](/workspace/socialpredict/backend/server/server.go)
+- `/v0/system/metrics` via [server.go](/workspace/socialpredict/backend/server/server.go)
+
+Important distinction:
+
+- `/health` is an infrastructure/runtime health endpoint
+- `/v0/system/metrics` is an application route backed by metrics handlers, not yet a full Prometheus-style infrastructure metrics boundary
+
+So the correct framing is not “create health and metrics from nothing.” The correct framing is “harden and clarify what exists, then extend deliberately.”
+
+### Current logger limitations
+
+Standardizing on `backend/logger` does not mean the logging story is finished.
+
+Current limitations include:
+
+- string-oriented convenience APIs rather than structured event shapes
+- per-call convenience construction in [simplelogging.go](/workspace/socialpredict/backend/logger/simplelogging.go)
+- request-boundary logging is now centralized in [requestboundary.go](/workspace/socialpredict/backend/security/requestboundary.go), but richer route, latency, and failure classification remains intentionally narrow
+- no unified redaction policy documented here yet
+- readiness/liveness now exist, but early-startup status before the HTTP listener is reachable remains deferred
+- no tracing boundary yet
+
+That is acceptable for the current note because the first task is not to build everything. The first task is to unify ownership and make future hardening coherent.
+
+### Canonical production request boundary
+
+The production HTTP chain in [server.go](/workspace/socialpredict/backend/server/server.go) receives requests in this order:
+
+```text
+OperationalMetrics.Middleware
+RequestBoundaryMiddlewareWithProxyTrust
+SecurityHeadersMiddleware
+CORS, when enabled
+router
+```
+
+That ownership matters:
+
+- `security.RequestBoundaryMiddlewareWithProxyTrust` owns request ID propagation, logger correlation context, traceparent field extraction, sanitized path logging, panic recovery, and one completion log per request.
+- `OperationalMetrics.Middleware` owns the process-local `/ops/status.requestFailuresTotal` counter for non-probe server-side `5xx` responses.
+- `logger.RequestLoggingMiddleware` is a legacy compatibility helper for package-level tests only. It should not be added to `server.go`, because that would create duplicate completion logs and competing request-boundary behavior.
+
+## OpenTelemetry Posture
+
+OpenTelemetry should be the canonical telemetry model for SocialPredict runtime signals, but it should not replace `backend/logger` as the code-facing logging seam.
+
+That means:
+
+- `backend/logger` remains the application-facing adapter used by startup, server, middleware, migration, and other runtime-boundary code
+- log, metric, and tracing vocabulary should converge toward OpenTelemetry semantic conventions over time
+- request correlation should be compatible with OpenTelemetry and W3C trace context so later tracing does not require a second correlation rewrite
+- OTLP and Collector should be the preferred production export path when richer telemetry export is introduced
+- stdout or stderr logging can remain the migration-time emission path, but the backend should not treat the OpenTelemetry stdout exporter format as a stable production wire contract
+
+For migration-time JSON logs outside OTLP, the backend should use top-level correlation fields that match OpenTelemetry compatibility guidance:
+
+- `trace_id`
+- `span_id`
+- `trace_flags`
+
+As of 2026-04-25, this adapter posture is also safer for SocialPredict because the OpenTelemetry logging specification is stable while Go log-signal implementation maturity still lags behind the cross-signal specification posture. The backend should not leak that churn into business code.
+
+## Logging and Observability Taxonomy
+
+### 1. Runtime Diagnostic Logging
+
+This covers backend log emission used to understand process behavior at runtime.
+
+Examples:
+
+- startup and shutdown messages
+- request lifecycle logging
+- handler/service error logs at the runtime boundary
+- migration and seed diagnostics
+
+Ownership:
+
+- runtime and infrastructure boundary
+- request middleware and server boundary
+- selected handler/application adapters where logging is still necessary
+
+Not owned by:
+
+- core domain policy
+- generic debug helper packages
+
+### 2. Health and Readiness Signals
+
+This covers operator-facing signals that determine whether the process is alive, healthy, and ready to receive traffic.
+
+Examples:
+
+- `/health`
+- `/readyz`
+- DB readiness and critical dependency checks
+
+These signals must remain simple, deterministic, and orchestration-friendly.
+
+### 3. Metrics
+
+This covers numeric signals intended for aggregation and alerting.
+
+Examples:
+
+- infrastructure request counts and latency
+- backend process/runtime metrics
+- business-level counters exposed intentionally through owned handlers
+
+Metrics are not a substitute for logs. They answer different questions and should not be collapsed into logging behavior.
+
+### 4. Tracing
+
+This covers cross-cutting request and dependency correlation for deeper production diagnosis.
+
+Tracing is a later observability phase, not a prerequisite for package standardization.
+
+Tracing should build on the same correlation vocabulary already introduced in logs and metrics rather than inventing a second request-identity shape.
+
+## Logger Package Direction
+
+The package decision is explicit:
+
+- `backend/logger` is the only backend logging package that should survive
+- `backend/logging` is legacy duplication and should be deprecated and deleted
+- no new backend code should import `socialpredict/logging`
+- no rewrite should introduce a second logging abstraction while standardization is incomplete
+
+The required migration path is:
+
+1. move remaining `backend/logging` imports to `backend/logger`
+2. port or replace any needed test helpers without preserving package duplication
+3. delete `backend/logging`
+4. then harden `backend/logger` as the sole backend log-emission adapter
+
+This note treats package unification as a prerequisite to richer observability work.
+
+## Operational Invariants
+
+For production operation, the backend should follow these rules:
+
+- one owned backend logging package only
+- keep `backend/logger` as the application-facing adapter even if export sinks or telemetry backends change
+- never log secrets, tokens, passwords, or API keys
+- prefer runtime-boundary logging over domain-policy logging
+- keep logs restart-friendly and aggregation-friendly via stdout/stderr-first emission
+- keep field vocabulary stable once request/correlation fields are introduced
+- align new correlation fields and event attributes with OpenTelemetry semantic conventions where practical
+- prefer OTLP and Collector as the long-term production telemetry path instead of binding to a stdout exporter contract
+- if migration-time JSON logs are emitted outside OTLP, use top-level `trace_id`, `span_id`, and `trace_flags`
+- treat health, metrics, and tracing as separate operational signals with separate owners
+- do not rely on arbitrary reflection-based dumping of runtime values in production code
+- do not introduce hot-path logging noise that obscures failures or raises operational cost without diagnostic value
+
+## Current Tree Versus Target Tree
+
+### Current logging-related tree
+
+```text
+backend/
+├── logger/
+│   ├── simplelogging.go
+│   ├── simplelogging_test.go
+│   └── README_SIMPLELOGGING.md
+├── logging/
+│   ├── loggingutils.go
+│   └── mocklogging.go
+├── handlers/
+│   ├── metrics/
+│   │   ├── getgloballeaderboard.go
+│   │   └── getsystemmetrics.go
+│   └── users/
+│       └── changepassword.go
+└── server/
+    └── server.go
+```
+
+### End-state objective
+
+The objective is not to create a new `observability/` platform tree immediately. The objective is to unify ownership and then evolve incrementally.
+
+```text
+backend/
+├── logger/
+│   ├── logger.go                  # sole owned backend logging adapter
+│   ├── logger_test.go
+│   ├── middleware.go              # request/correlation logging when introduced
+│   └── README.md
+├── handlers/
+│   ├── metrics/                   # owned application/system metrics handlers
+│   └── users/
+├── server/
+│   └── server.go                  # health/readiness and runtime-boundary wiring
+└── logging/                       # deleted
+```
+
+The near-term target is one package, one migration path, and one operational vocabulary.
+
+## Design Rules
+
+The intended direction is:
+
+- standardize on `backend/logger`
+- deprecate and delete `backend/logging`
+- keep logging as a runtime and infrastructure concern
+- treat OpenTelemetry as the canonical telemetry model and correlation vocabulary without coupling business code directly to a language SDK surface
+- keep the April 30, 2026 `/health` and `/readyz` split simple, deterministic, and orchestration-friendly
+- preserve a distinction between logs, metrics, tracing, and health signals
+- add request and correlation context at the runtime boundary in controlled slices
+- harden redaction and sensitive-data handling before expanding log volume
+- prefer OTLP or Collector export as the production target once richer telemetry is introduced
+- evolve observability incrementally from the existing backend shape
+
+The intended direction is not:
+
+- a new top-level `observability/` package tree before ownership is unified
+- a second logging abstraction
+- treating an SDK-specific stdout exporter format as the production logging contract
+- reflection-heavy diagnostic dumping as a durable production strategy
+- forcing metrics, tracing, health, and logs into one generic package family
+- pretending the backend starts with zero health or metrics support
+
+## Concrete Next Migration Goals
+
+1. Replace the remaining `socialpredict/logging` imports with `socialpredict/logger`.
+2. Delete `backend/logging` once remaining usage and tests are migrated.
+3. Define the stable backend logging API and message or field vocabulary for the surviving `backend/logger` package, including OpenTelemetry-aligned correlation fields.
+4. Add request/correlation logging at the server or middleware boundary rather than scattering it across handlers.
+5. Decide the first acceptable OTLP or Collector export path without coupling application code directly to it.
+6. Treat the April 30, 2026 `/health` and `/readyz` split as the completed serving-path baseline, then decide how deployment and monitoring should consume it.
+7. Decide which metrics belong to runtime/infrastructure versus application/business surfaces before adding more endpoints.
+8. Defer tracing until package ownership, request correlation, health semantics, and the logger contract are stable.
+
+## What This Note Replaces
+
+This update replaces the older recommendation to:
+
+- build a broad new observability platform from scratch
+- introduce a new `logging/` or `observability/` package family
+- assume health and metrics primitives are absent
+- select tools first and boundaries later
+
+SocialPredict’s immediate need is operational boundary clarity:
+
+- one backend logging package
+- clear deprecation of `backend/logging`
+- one OpenTelemetry-aligned telemetry direction that does not leak directly into business code
+- accurate documentation of the current runtime surface
+- staged observability hardening consistent with a high-availability, fault-tolerant backend

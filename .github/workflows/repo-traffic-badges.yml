@@ -1,0 +1,149 @@
+name: Repository Traffic Badges
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '01 2 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  METRICS_DIR: README/METRICS
+  TRAFFIC_BADGE_BRANCH: docs/update-repository-traffic-badges
+
+jobs:
+  update-traffic-badges:
+    name: Update repository traffic badges
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Fetch rolling 14-day clone metrics
+        id: traffic
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_METRICS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Traffic metrics token missing::Skipping repository traffic badge refresh. Add TRAFFIC_METRICS_TOKEN with read access to repository Administration to update these badges."
+            exit 0
+          fi
+
+          mkdir -p "$METRICS_DIR"
+          if ! gh api "repos/$GITHUB_REPOSITORY/traffic/clones" > "$RUNNER_TEMP/clones.json"; then
+            echo "::error title=Traffic metrics API denied::TRAFFIC_METRICS_TOKEN must have read access to repository Administration for $GITHUB_REPOSITORY."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import quote
+
+          metrics_dir = Path(os.environ['METRICS_DIR'])
+          data = json.loads(Path(os.environ['RUNNER_TEMP'], 'clones.json').read_text())
+          updated = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+          def write_badge(filename, label, value, color):
+              payload = {
+                  'schemaVersion': 1,
+                  'label': label,
+                  'message': f'{int(value):,}',
+                  'color': color,
+              }
+              (metrics_dir / filename).write_text(json.dumps(payload, indent=2) + '\n')
+
+          write_badge('clones-14d.json', '14d clones', data.get('count', 0), '62c3f8')
+          write_badge('unique-cloners-14d.json', '14d cloners', data.get('uniques', 0), '2ea043')
+          (metrics_dir / 'github-traffic-latest.json').write_text(json.dumps({
+              'updated_at': updated,
+              'clones_14d': data.get('count', 0),
+              'unique_cloners_14d': data.get('uniques', 0),
+              'source': 'GitHub repository traffic API, rolling 14-day window',
+              'clones': data.get('clones', []),
+          }, indent=2) + '\n')
+
+          def static_badge(label, value, color):
+              return f"https://img.shields.io/badge/{quote(label)}-{quote(f'{int(value):,}')}-{color}"
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          readme_text = re.sub(
+              r'^\[clones-14d-img\]: .*$',
+              f"[clones-14d-img]: {static_badge('14d clones', data.get('count', 0), '62c3f8')}",
+              readme_text,
+              flags=re.MULTILINE,
+          )
+          readme_text = re.sub(
+              r'^\[unique-cloners-14d-img\]: .*$',
+              f"[unique-cloners-14d-img]: {static_badge('14d cloners', data.get('uniques', 0), '2ea043')}",
+              readme_text,
+              flags=re.MULTILINE,
+          )
+          readme.write_text(readme_text)
+          PY
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request for updated traffic badges
+        if: steps.traffic.outputs.updated == 'true'
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.TRAFFIC_METRICS_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md "$METRICS_DIR"/*.json
+          if git diff --cached --quiet; then
+            echo "Traffic badge metrics unchanged."
+            exit 0
+          fi
+          git commit -m "docs: update repository traffic badges"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_sha="$(git ls-remote --heads origin "$TRAFFIC_BADGE_BRANCH" | awk '{print $1}')"
+          if [ -n "$remote_sha" ]; then
+            git push --force-with-lease="refs/heads/${TRAFFIC_BADGE_BRANCH}:${remote_sha}" origin "HEAD:${TRAFFIC_BADGE_BRANCH}"
+          else
+            git push origin "HEAD:${TRAFFIC_BADGE_BRANCH}"
+          fi
+
+          pr_body="$(mktemp)"
+          cat > "$pr_body" <<'EOF'
+          Updates the repository traffic badge metrics from GitHub's rolling 14-day traffic API.
+
+          This PR is created automatically by the Repository Traffic Badges workflow.
+          EOF
+
+          pr_number="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --head "$TRAFFIC_BADGE_BRANCH" \
+              --base "$BASE_BRANCH" \
+              --state open \
+              --json number \
+              --jq '.[0].number // ""'
+          )"
+
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "docs: update repository traffic badges" \
+              --body-file "$pr_body"
+            echo "Updated traffic badge pull request #${pr_number}."
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$TRAFFIC_BADGE_BRANCH" \
+              --title "docs: update repository traffic badges" \
+              --body-file "$pr_body"
+          fi

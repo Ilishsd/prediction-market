@@ -1,0 +1,244 @@
+import { API_URL } from '../../../../config';
+import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import { getMarketLabels } from '../../../../utils/labelMapping';
+import { unwrapApiResponse } from '../../../../utils/apiResponse';
+
+const paginationButtonClass = [
+    'rounded',
+    'border',
+    'border-transparent',
+    'bg-neutral-btn',
+    'px-3',
+    'py-1.5',
+    'text-xs',
+    'font-semibold',
+    'text-white',
+    'transition-colors',
+    'duration-200',
+    'hover:bg-neutral-btn-hover',
+    'disabled:cursor-not-allowed',
+    'disabled:bg-custom-gray-light',
+    'disabled:text-gray-400',
+    'disabled:opacity-60',
+].join(' ');
+
+const LeaderboardActivity = ({ marketId, market, refreshTrigger }) => {
+    const pageSize = 20;
+    const [leaderboard, setLeaderboard] = useState([]);
+    const [freshness, setFreshness] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [page, setPage] = useState(0);
+    const [hasNextPage, setHasNextPage] = useState(false);
+
+    useEffect(() => {
+        setPage(0);
+    }, [marketId, refreshTrigger]);
+
+    useEffect(() => {
+        const fetchLeaderboard = async () => {
+            try {
+                setLoading(true);
+                const offset = page * pageSize;
+                const response = await fetch(`${API_URL}/v0/markets/${marketId}/leaderboard?limit=${pageSize + 1}&offset=${offset}`);
+                if (response.ok) {
+                    const data = unwrapApiResponse(await response.json());
+                    const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
+                    setLeaderboard(rows.slice(0, pageSize));
+                    setHasNextPage(rows.length > pageSize);
+                    setFreshness(data?.freshness || null);
+                    setError(null);
+                } else {
+                    console.error('Error fetching leaderboard:', response.statusText);
+                    setError('Failed to load leaderboard data');
+                    setHasNextPage(false);
+                    setFreshness(null);
+                }
+            } catch (err) {
+                console.error('Error fetching leaderboard:', err);
+                setError('Failed to load leaderboard data');
+                setHasNextPage(false);
+                setFreshness(null);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        if (marketId) {
+            fetchLeaderboard();
+        }
+    }, [marketId, page, refreshTrigger]);
+
+    const freshnessLabel = freshness?.generatedAt
+        ? new Date(freshness.generatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+        : null;
+
+    const formatCurrency = (amount) => {
+        return amount.toLocaleString();
+    };
+
+    const getProfitColor = (profit) => {
+        if (profit > 0) return 'text-green-400';
+        if (profit < 0) return 'text-red-400';
+        return 'text-gray-300';
+    };
+
+    const getPositionBadge = (position) => {
+        const baseClasses = "px-2 py-1 rounded text-xs font-bold";
+        switch (position) {
+            case 'YES':
+                return `${baseClasses} bg-green-600 text-white`;
+            case 'NO':
+                return `${baseClasses} bg-red-600 text-white`;
+            case 'NEUTRAL':
+                return `${baseClasses} bg-yellow-600 text-white`;
+            default:
+                return `${baseClasses} bg-gray-600 text-white`;
+        }
+    };
+
+    const getRankDisplay = (rank) => {
+        if (rank === 1) return "🥇";
+        if (rank === 2) return "🥈";
+        if (rank === 3) return "🥉";
+        return `#${rank}`;
+    };
+
+    if (loading) {
+        return (
+            <div className="p-4 text-center">
+                <div className="text-gray-400">Loading leaderboard...</div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="p-4 text-center">
+                <div className="text-red-400">{error}</div>
+            </div>
+        );
+    }
+
+    if (leaderboard.length === 0) {
+        return (
+            <div className="p-4 text-center">
+                <div className="text-gray-400">No participants yet</div>
+            </div>
+        );
+    }
+
+    const labels = market ? getMarketLabels(market) : { yes: "YES", no: "NO" };
+    const canPageBack = page > 0;
+    const canPageForward = hasNextPage;
+
+    return (
+        <div className="p-4">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <div className="text-xs uppercase tracking-[0.16em] text-gray-400">
+                        Showing leaderboard page {page + 1}
+                    </div>
+                    {freshnessLabel && (
+                        <div className="mt-1 text-xs text-gray-500">
+                            Leaderboard generated at {freshnessLabel}. Trade confirmations remain authoritative.
+                        </div>
+                    )}
+                </div>
+                <div className="flex gap-2">
+                    <button
+                        type="button"
+                        onClick={() => setPage(current => Math.max(0, current - 1))}
+                        disabled={!canPageBack}
+                        className={paginationButtonClass}
+                    >
+                        Previous
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setPage(current => current + 1)}
+                        disabled={!canPageForward}
+                        className={paginationButtonClass}
+                    >
+                        Next
+                    </button>
+                </div>
+            </div>
+
+            {/* Header */}
+            <div className="sp-grid-leaderboard-header">
+                <div>Rank</div>
+                <div>User</div>
+                <div>Position</div>
+                <div className="text-right">Profit</div>
+                <div className="text-right">Current Value</div>
+                <div className="text-right">Total Spent</div>
+                <div>Shares</div>
+            </div>
+
+            {/* Leaderboard Rows */}
+            {leaderboard.map((entry, index) => (
+                <div key={entry.username} className="sp-grid-leaderboard-row mt-2">
+                    {/* Rank + Username (xs) / Rank (sm+) */}
+                    <div className="flex items-center justify-start">
+                        <div className="text-white font-bold text-lg mr-2">
+                            {getRankDisplay(entry.rank)}
+                        </div>
+                        <div className="sm:hidden sp-cell-username">
+                            <div className="sp-ellipsis text-xs font-medium">
+                                <Link to={`/user/${entry.username}`} className="text-blue-500 hover:text-blue-400 transition-colors">
+                                    {entry.username}
+                                </Link>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Username (sm+) */}
+                    <div className="hidden sm:block sp-cell-username">
+                        <div className="sp-ellipsis font-medium">
+                            <Link to={`/user/${entry.username}`} className="text-blue-500 hover:text-blue-400 transition-colors">
+                                {entry.username}
+                            </Link>
+                        </div>
+                    </div>
+
+                    {/* Position (sm+) */}
+                    <div className="hidden sm:block">
+                        <span className={getPositionBadge(entry.position)}>
+                            {entry.position}
+                        </span>
+                    </div>
+
+                    {/* P&L + Subline (xs) / Profit (sm+) */}
+                    <div className="text-right">
+                        <div className={`font-bold text-sm ${getProfitColor(entry.profit)}`}>
+                            {entry.profit >= 0 ? '+' : ''}{formatCurrency(entry.profit)}
+                        </div>
+                        <div className="sm:hidden sp-subline">
+                            Pos {entry.position} • {entry.yesSharesOwned}Y {entry.noSharesOwned}N
+                        </div>
+                    </div>
+
+                    {/* Current Value (sm+) */}
+                    <div className="hidden sm:block sp-cell-num text-gray-300">
+                        {formatCurrency(entry.currentValue)}
+                    </div>
+
+                    {/* Total Spent (sm+) */}
+                    <div className="hidden sm:block sp-cell-num text-gray-300">
+                        {formatCurrency(entry.totalSpent)}
+                    </div>
+
+                    {/* Shares (sm+) */}
+                    <div className="hidden sm:block text-gray-300 text-xs">
+                        <div>{labels.yes}: {entry.yesSharesOwned}</div>
+                        <div>{labels.no}: {entry.noSharesOwned}</div>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+export default LeaderboardActivity;

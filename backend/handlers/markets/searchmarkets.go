@@ -1,0 +1,255 @@
+package marketshandlers
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+
+	"socialpredict/handlers"
+	"socialpredict/handlers/markets/dto"
+	dmarkets "socialpredict/internal/domain/markets"
+	"socialpredict/logger"
+	"socialpredict/security"
+)
+
+// SearchMarketsHandler handles HTTP requests for searching markets - HTTP-only with service injection
+func SearchMarketsHandler(svc dmarkets.ServiceInterface, securityService *security.SecurityService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		handleSearchMarkets(w, r, svc, securityService)
+	}
+}
+
+type searchRequestParams struct {
+	query   string
+	filters dmarkets.SearchFilters
+}
+
+type marketDiscoverySearchProvider interface {
+	SearchMarketDiscovery(ctx context.Context, query string, filters dmarkets.SearchFilters) (*dmarkets.MarketDiscoverySearchResults, error)
+}
+
+type httpError struct {
+	message    string
+	statusCode int
+}
+
+func parseSearchRequest(r *http.Request, securityService *security.SecurityService) (searchRequestParams, *httpError) {
+	query, queryErr := extractQuery(r)
+	if queryErr != nil {
+		return searchRequestParams{}, queryErr
+	}
+
+	sanitizedQuery, sanitizeErr := sanitizeQuery(query, securityService)
+	if sanitizeErr != nil {
+		return searchRequestParams{}, sanitizeErr
+	}
+
+	return buildSearchRequestParams(r, sanitizedQuery)
+}
+
+func extractQuery(r *http.Request) (string, *httpError) {
+	for _, key := range []string{"query", "q"} {
+		if value := r.URL.Query().Get(key); value != "" {
+			return value, nil
+		}
+	}
+	return "", &httpError{message: "Query parameter 'query' is required", statusCode: http.StatusBadRequest}
+}
+
+func sanitizeQuery(query string, securityService *security.SecurityService) (string, *httpError) {
+	if securityService == nil || securityService.Sanitizer == nil {
+		return "", &httpError{message: "Security service unavailable", statusCode: http.StatusInternalServerError}
+	}
+
+	sanitizedQuery, err := securityService.Sanitizer.SanitizeMarketTitle(query)
+	if err != nil {
+		logger.LogWarn("SearchMarkets", "SanitizeQuery", "sanitization failed for query '"+query+"': "+err.Error())
+		return "", &httpError{message: "Invalid search query: " + err.Error(), statusCode: http.StatusBadRequest}
+	}
+	if len(sanitizedQuery) > 100 {
+		return "", &httpError{message: "Query too long (max 100 characters)", statusCode: http.StatusBadRequest}
+	}
+	return sanitizedQuery, nil
+}
+
+func parseLimit(rawLimit string) int {
+	return security.ParseBoundedIntParam(rawLimit, 20, 1, 50)
+}
+
+func parseOffset(rawOffset string) int {
+	return security.ParseBoundedIntParam(rawOffset, 0, 0, int(^uint(0)>>1))
+}
+
+func buildSearchResponse(ctx context.Context, svc dmarkets.ServiceInterface, searchResults *dmarkets.SearchResults) (dto.SearchResponse, error) {
+	primaryOverviews, err := buildSearchResultSet(ctx, svc, searchResults.PrimaryResults)
+	if err != nil {
+		logger.LogError("SearchMarkets", "BuildPrimaryResults", err)
+		return dto.SearchResponse{}, errors.New("Error building primary results")
+	}
+
+	fallbackOverviews, err := buildSearchResultSet(ctx, svc, searchResults.FallbackResults)
+	if err != nil {
+		logger.LogError("SearchMarkets", "BuildFallbackResults", err)
+		return dto.SearchResponse{}, errors.New("Error building fallback results")
+	}
+
+	return dto.SearchResponse{
+		PrimaryResults:  primaryOverviews,
+		FallbackResults: fallbackOverviews,
+		Query:           searchResults.Query,
+		PrimaryStatus:   searchResults.PrimaryStatus,
+		PrimaryCount:    searchResults.PrimaryCount,
+		FallbackCount:   searchResults.FallbackCount,
+		TotalCount:      searchResults.TotalCount,
+		FallbackUsed:    searchResults.FallbackUsed,
+	}, nil
+}
+
+func buildDiscoverySearchResponse(ctx context.Context, svc dmarkets.ServiceInterface, searchResults *dmarkets.MarketDiscoverySearchResults) (dto.SearchResponse, error) {
+	primaryOverviews, err := buildMarketDiscoveryOverviewResponses(ctx, svc, searchResults.PrimaryRows)
+	if err != nil {
+		logger.LogError("SearchMarkets", "BuildPrimaryDiscoveryResults", err)
+		return dto.SearchResponse{}, errors.New("Error building primary results")
+	}
+
+	fallbackOverviews, err := buildMarketDiscoveryOverviewResponses(ctx, svc, searchResults.FallbackRows)
+	if err != nil {
+		logger.LogError("SearchMarkets", "BuildFallbackDiscoveryResults", err)
+		return dto.SearchResponse{}, errors.New("Error building fallback results")
+	}
+
+	return dto.SearchResponse{
+		PrimaryResults:  primaryOverviews,
+		FallbackResults: fallbackOverviews,
+		Query:           searchResults.Query,
+		PrimaryStatus:   searchResults.PrimaryStatus,
+		PrimaryCount:    searchResults.PrimaryCount,
+		FallbackCount:   searchResults.FallbackCount,
+		TotalCount:      searchResults.TotalCount,
+		FallbackUsed:    searchResults.FallbackUsed,
+	}, nil
+}
+
+func buildSearchRequestParams(r *http.Request, query string) (searchRequestParams, *httpError) {
+	filters, filtersErr := parseSearchFilters(r)
+	if filtersErr != nil {
+		return searchRequestParams{}, filtersErr
+	}
+
+	return searchRequestParams{
+		query:   query,
+		filters: filters,
+	}, nil
+}
+
+func parseSearchFilters(r *http.Request) (dmarkets.SearchFilters, *httpError) {
+	status, err := normalizeStatusParam(r.URL.Query().Get("status"))
+	if err != nil {
+		return dmarkets.SearchFilters{}, &httpError{message: err.Error(), statusCode: http.StatusBadRequest}
+	}
+
+	return dmarkets.SearchFilters{
+		Status:  status,
+		TagSlug: normalizeTagSlugParam(r.URL.Query().Get("tagSlug")),
+		Limit:   parseLimit(r.URL.Query().Get("limit")),
+		Offset:  parseOffset(r.URL.Query().Get("offset")),
+	}, nil
+}
+
+func normalizeTagSlugParam(value string) string {
+	return strings.Trim(strings.ToLower(strings.TrimSpace(value)), "-")
+}
+
+func searchMarkets(ctx context.Context, svc dmarkets.ServiceInterface, params searchRequestParams) (*dmarkets.SearchResults, error) {
+	return svc.SearchMarkets(ctx, params.query, params.filters)
+}
+
+func buildSearchResultSet(ctx context.Context, svc dmarkets.ServiceInterface, markets []*dmarkets.Market) ([]*dto.MarketOverviewResponse, error) {
+	return buildMarketOverviewResponses(ctx, svc, markets)
+}
+
+func writeSearchResponse(w http.ResponseWriter, ctx context.Context, svc dmarkets.ServiceInterface, searchResults *dmarkets.SearchResults) error {
+	response, err := buildSearchResponse(ctx, svc, searchResults)
+	if err != nil {
+		return err
+	}
+
+	if err := writeJSON(w, http.StatusOK, response); err != nil {
+		logger.LogError("SearchMarkets", "EncodeResponse", err)
+		return err
+	}
+
+	return nil
+}
+
+func writeDiscoverySearchResponse(w http.ResponseWriter, ctx context.Context, svc dmarkets.ServiceInterface, searchResults *dmarkets.MarketDiscoverySearchResults) error {
+	response, err := buildDiscoverySearchResponse(ctx, svc, searchResults)
+	if err != nil {
+		return err
+	}
+
+	if err := writeJSON(w, http.StatusOK, response); err != nil {
+		logger.LogError("SearchMarkets", "EncodeDiscoveryResponse", err)
+		return err
+	}
+
+	return nil
+}
+
+func writeSearchError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, dmarkets.ErrInvalidInput):
+		_ = handlers.WriteFailure(w, http.StatusBadRequest, handlers.ReasonValidationFailed)
+	default:
+		logger.LogError("SearchMarkets", "SearchMarkets", err)
+		writeInternalError(w)
+	}
+}
+
+func handleSearchMarkets(w http.ResponseWriter, r *http.Request, svc dmarkets.ServiceInterface, securityService *security.SecurityService) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if securityService == nil || securityService.Sanitizer == nil {
+		writeInternalError(w)
+		return
+	}
+
+	params, clientErr := parseSearchRequest(r, securityService)
+	if clientErr != nil {
+		_ = handlers.WriteFailure(w, clientErr.statusCode, handlers.ReasonInvalidRequest)
+		return
+	}
+
+	if provider, ok := svc.(marketDiscoverySearchProvider); ok {
+		searchResults, err := provider.SearchMarketDiscovery(r.Context(), params.query, params.filters)
+		if err != nil {
+			writeSearchError(w, err)
+			return
+		}
+		if err := writeDiscoverySearchResponse(w, r.Context(), svc, searchResults); err != nil {
+			if isRequestCanceled(err) {
+				return
+			}
+			logger.LogError("SearchMarkets", "WriteDiscoveryResponse", err)
+			writeInternalError(w)
+		}
+		return
+	}
+
+	searchResults, err := searchMarkets(r.Context(), svc, params)
+	if err != nil {
+		writeSearchError(w, err)
+		return
+	}
+
+	if err := writeSearchResponse(w, r.Context(), svc, searchResults); err != nil {
+		if isRequestCanceled(err) {
+			return
+		}
+		logger.LogError("SearchMarkets", "WriteResponse", err)
+		writeInternalError(w)
+	}
+}

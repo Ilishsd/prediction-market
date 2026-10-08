@@ -1,0 +1,252 @@
+package config
+
+import "socialpredict/setup"
+
+const (
+	minChartSigFigs     = 2
+	maxChartSigFigs     = 9
+	defaultChartSigFigs = 4
+
+	GameModeOpen      = "open"
+	GameModeModerator = "moderator"
+)
+
+type MarketCreation struct {
+	InitialMarketProbability   float64 `yaml:"initialMarketProbability" json:"initialMarketProbability"`
+	InitialMarketSubsidization int64   `yaml:"initialMarketSubsidization" json:"initialMarketSubsidization"`
+	InitialMarketYes           int64   `yaml:"initialMarketYes" json:"initialMarketYes"`
+	InitialMarketNo            int64   `yaml:"initialMarketNo" json:"initialMarketNo"`
+	MinimumFutureHours         float64 `yaml:"minimumFutureHours" json:"minimumFutureHours"`
+}
+
+type MarketIncentives struct {
+	CreateMarketCost     int64                       `yaml:"createMarketCost" json:"createMarketCost"`
+	TraderBonus          int64                       `yaml:"traderBonus" json:"traderBonus"`
+	MultipleChoiceBinary MultipleChoiceBinaryMarkets `yaml:"multipleChoiceBinary" json:"multipleChoiceBinary"`
+}
+
+type MultipleChoiceBinaryMarkets struct {
+	AddAnswerCost             int64 `yaml:"addAnswerCost" json:"addAnswerCost"`
+	SoftAnswerReviewThreshold int   `yaml:"softAnswerReviewThreshold" json:"softAnswerReviewThreshold"`
+	HardAnswerSafetyCap       int   `yaml:"hardAnswerSafetyCap" json:"hardAnswerSafetyCap"`
+}
+
+type User struct {
+	InitialAccountBalance int64 `yaml:"initialAccountBalance" json:"initialAccountBalance"`
+	MaximumDebtAllowed    int64 `yaml:"maximumDebtAllowed" json:"maximumDebtAllowed"`
+}
+
+type BetFees struct {
+	InitialBetFee int64 `yaml:"initialBetFee" json:"initialBetFee"`
+	BuySharesFee  int64 `yaml:"buySharesFee" json:"buySharesFee"`
+	SellSharesFee int64 `yaml:"sellSharesFee" json:"sellSharesFee"`
+}
+
+type Betting struct {
+	MinimumBet     int64   `yaml:"minimumBet" json:"minimumBet"`
+	MaxDustPerSale int64   `yaml:"maxDustPerSale" json:"maxDustPerSale"`
+	BetFees        BetFees `yaml:"betFees" json:"betFees"`
+}
+
+type Economics struct {
+	MarketCreation   MarketCreation   `yaml:"marketcreation" json:"marketcreation"`
+	MarketIncentives MarketIncentives `yaml:"marketincentives" json:"marketincentives"`
+	User             User             `yaml:"user" json:"user"`
+	Betting          Betting          `yaml:"betting" json:"betting"`
+}
+
+type FrontendCharts struct {
+	SigFigs int `yaml:"sigFigs" json:"sigFigs"`
+}
+
+type Frontend struct {
+	Charts FrontendCharts `yaml:"charts" json:"charts"`
+}
+
+type Moderation struct {
+	MarketApprovalRequired      bool `yaml:"marketApprovalRequired" json:"marketApprovalRequired"`
+	ModeratorCanTrade           bool `yaml:"moderatorCanTrade" json:"moderatorCanTrade"`
+	ModeratorCanTradeOwnMarkets bool `yaml:"moderatorCanTradeOwnMarkets" json:"moderatorCanTradeOwnMarkets"`
+	AdminCanYankMarkets         bool `yaml:"adminCanYankMarkets" json:"adminCanYankMarkets"`
+}
+
+type Game struct {
+	Mode       string     `yaml:"mode" json:"mode"`
+	Moderation Moderation `yaml:"moderation" json:"moderation"`
+}
+
+type AppConfig struct {
+	Economics Economics `yaml:"economics" json:"economics"`
+	Frontend  Frontend  `yaml:"frontend" json:"frontend"`
+	Game      Game      `yaml:"game" json:"game"`
+}
+
+// Clone returns a detached copy of the application policy snapshot.
+func (cfg *AppConfig) Clone() *AppConfig {
+	if cfg == nil {
+		return &AppConfig{}
+	}
+
+	cfgCopy := *cfg
+	return &cfgCopy
+}
+
+// FromSetup converts the legacy setup snapshot into the owned config service types.
+func FromSetup(cfg *setup.EconomicConfig) *AppConfig {
+	if cfg == nil {
+		return Normalize(&AppConfig{})
+	}
+
+	return Normalize(&AppConfig{
+		Economics: Economics{
+			MarketCreation: MarketCreation{
+				InitialMarketProbability:   cfg.Economics.MarketCreation.InitialMarketProbability,
+				InitialMarketSubsidization: cfg.Economics.MarketCreation.InitialMarketSubsidization,
+				InitialMarketYes:           cfg.Economics.MarketCreation.InitialMarketYes,
+				InitialMarketNo:            cfg.Economics.MarketCreation.InitialMarketNo,
+				MinimumFutureHours:         cfg.Economics.MarketCreation.MinimumFutureHours,
+			},
+			MarketIncentives: MarketIncentives{
+				CreateMarketCost: cfg.Economics.MarketIncentives.CreateMarketCost,
+				TraderBonus:      cfg.Economics.MarketIncentives.TraderBonus,
+				MultipleChoiceBinary: MultipleChoiceBinaryMarkets{
+					AddAnswerCost:             cfg.Economics.MarketIncentives.MultipleChoiceBinary.AddAnswerCost,
+					SoftAnswerReviewThreshold: cfg.Economics.MarketIncentives.MultipleChoiceBinary.SoftAnswerReviewThreshold,
+					HardAnswerSafetyCap:       cfg.Economics.MarketIncentives.MultipleChoiceBinary.HardAnswerSafetyCap,
+				},
+			},
+			User: User{
+				InitialAccountBalance: cfg.Economics.User.InitialAccountBalance,
+				MaximumDebtAllowed:    cfg.Economics.User.MaximumDebtAllowed,
+			},
+			Betting: Betting{
+				MinimumBet:     cfg.Economics.Betting.MinimumBet,
+				MaxDustPerSale: cfg.Economics.Betting.MaxDustPerSale,
+				BetFees: BetFees{
+					InitialBetFee: cfg.Economics.Betting.BetFees.InitialBetFee,
+					BuySharesFee:  cfg.Economics.Betting.BetFees.BuySharesFee,
+					SellSharesFee: cfg.Economics.Betting.BetFees.SellSharesFee,
+				},
+			},
+		},
+		Frontend: Frontend{
+			Charts: FrontendCharts{
+				SigFigs: cfg.Frontend.Charts.SigFigs,
+			},
+		},
+		Game: Game{
+			Mode: cfg.Game.Mode,
+			Moderation: Moderation{
+				MarketApprovalRequired:      cfg.Game.Moderation.MarketApprovalRequired,
+				ModeratorCanTrade:           cfg.Game.Moderation.ModeratorCanTrade,
+				ModeratorCanTradeOwnMarkets: cfg.Game.Moderation.ModeratorCanTradeOwnMarkets,
+				AdminCanYankMarkets:         cfg.Game.Moderation.AdminCanYankMarkets,
+			},
+		},
+	})
+}
+
+// ToSetup converts the owned snapshot into the legacy setup shape for unmigrated consumers.
+func (cfg *AppConfig) ToSetup() *setup.EconomicConfig {
+	if cfg == nil {
+		cfg = Normalize(nil)
+	} else {
+		cfg = Normalize(cfg)
+	}
+
+	return &setup.EconomicConfig{
+		Economics: setup.Economics{
+			MarketCreation: setup.MarketCreation{
+				InitialMarketProbability:   cfg.Economics.MarketCreation.InitialMarketProbability,
+				InitialMarketSubsidization: cfg.Economics.MarketCreation.InitialMarketSubsidization,
+				InitialMarketYes:           cfg.Economics.MarketCreation.InitialMarketYes,
+				InitialMarketNo:            cfg.Economics.MarketCreation.InitialMarketNo,
+				MinimumFutureHours:         cfg.Economics.MarketCreation.MinimumFutureHours,
+			},
+			MarketIncentives: setup.MarketIncentives{
+				CreateMarketCost: cfg.Economics.MarketIncentives.CreateMarketCost,
+				TraderBonus:      cfg.Economics.MarketIncentives.TraderBonus,
+				MultipleChoiceBinary: setup.MultipleChoiceBinaryMarkets{
+					AddAnswerCost:             cfg.Economics.MarketIncentives.MultipleChoiceBinary.AddAnswerCost,
+					SoftAnswerReviewThreshold: cfg.Economics.MarketIncentives.MultipleChoiceBinary.SoftAnswerReviewThreshold,
+					HardAnswerSafetyCap:       cfg.Economics.MarketIncentives.MultipleChoiceBinary.HardAnswerSafetyCap,
+				},
+			},
+			User: setup.User{
+				InitialAccountBalance: cfg.Economics.User.InitialAccountBalance,
+				MaximumDebtAllowed:    cfg.Economics.User.MaximumDebtAllowed,
+			},
+			Betting: setup.Betting{
+				MinimumBet:     cfg.Economics.Betting.MinimumBet,
+				MaxDustPerSale: cfg.Economics.Betting.MaxDustPerSale,
+				BetFees: setup.BetFees{
+					InitialBetFee: cfg.Economics.Betting.BetFees.InitialBetFee,
+					BuySharesFee:  cfg.Economics.Betting.BetFees.BuySharesFee,
+					SellSharesFee: cfg.Economics.Betting.BetFees.SellSharesFee,
+				},
+			},
+		},
+		Frontend: setup.Frontend{
+			Charts: setup.FrontendCharts{
+				SigFigs: cfg.Frontend.Charts.SigFigs,
+			},
+		},
+		Game: setup.Game{
+			Mode: cfg.Game.Mode,
+			Moderation: setup.Moderation{
+				MarketApprovalRequired:      cfg.Game.Moderation.MarketApprovalRequired,
+				ModeratorCanTrade:           cfg.Game.Moderation.ModeratorCanTrade,
+				ModeratorCanTradeOwnMarkets: cfg.Game.Moderation.ModeratorCanTradeOwnMarkets,
+				AdminCanYankMarkets:         cfg.Game.Moderation.AdminCanYankMarkets,
+			},
+		},
+	}
+}
+
+// Normalize applies default application policy values to a detached config snapshot.
+func Normalize(cfg *AppConfig) *AppConfig {
+	if cfg == nil {
+		cfg = &AppConfig{}
+	} else {
+		cfg = cfg.Clone()
+	}
+
+	cfg.Game = NormalizeGame(cfg.Game)
+	return cfg
+}
+
+// NormalizeGame applies safe defaults to game-mode policy.
+func NormalizeGame(game Game) Game {
+	if game.Mode == "" {
+		game.Mode = GameModeModerator
+	}
+
+	// These defaults are the intended moderator-mode posture if an operator
+	// enables moderator mode without spelling out every moderation flag.
+	if game.Moderation == (Moderation{}) {
+		game.Moderation = Moderation{
+			MarketApprovalRequired:      true,
+			ModeratorCanTrade:           true,
+			ModeratorCanTradeOwnMarkets: false,
+			AdminCanYankMarkets:         true,
+		}
+	}
+
+	return game
+}
+
+// ClampChartSigFigs bounds the frontend chart precision to the supported range.
+func ClampChartSigFigs(frontend Frontend) int {
+	sigFigs := frontend.Charts.SigFigs
+	if sigFigs == 0 {
+		sigFigs = defaultChartSigFigs
+	}
+
+	if sigFigs < minChartSigFigs {
+		return minChartSigFigs
+	}
+	if sigFigs > maxChartSigFigs {
+		return maxChartSigFigs
+	}
+	return sigFigs
+}

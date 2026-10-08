@@ -1,0 +1,229 @@
+package marketshandlers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"socialpredict/handlers"
+	"socialpredict/handlers/markets/dto"
+	dmarkets "socialpredict/internal/domain/markets"
+	"socialpredict/security"
+)
+
+type searchServiceMock struct {
+	result          *dmarkets.SearchResults
+	err             error
+	createFn        func(ctx context.Context, req dmarkets.MarketCreateRequest, creatorUsername string) (*dmarkets.Market, error)
+	capturedQuery   string
+	capturedFilters dmarkets.SearchFilters
+	overviews       map[int64]*dmarkets.MarketOverview
+}
+
+func (m *searchServiceMock) CreateMarket(ctx context.Context, req dmarkets.MarketCreateRequest, creatorUsername string) (*dmarkets.Market, error) {
+	if m.createFn != nil {
+		return m.createFn(ctx, req, creatorUsername)
+	}
+	return nil, nil
+}
+
+func (m *searchServiceMock) SetCustomLabels(ctx context.Context, marketID int64, yesLabel, noLabel string) error {
+	return nil
+}
+
+func (m *searchServiceMock) GetMarket(ctx context.Context, id int64) (*dmarkets.Market, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) ListMarkets(ctx context.Context, filters dmarkets.ListFilters) ([]*dmarkets.Market, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) SearchMarkets(ctx context.Context, query string, filters dmarkets.SearchFilters) (*dmarkets.SearchResults, error) {
+	m.capturedQuery = query
+	m.capturedFilters = filters
+	return m.result, m.err
+}
+
+func (m *searchServiceMock) ResolveMarket(ctx context.Context, marketID int64, resolution string, username string) error {
+	return nil
+}
+
+func (m *searchServiceMock) ListByStatus(ctx context.Context, status string, p dmarkets.Page) ([]*dmarkets.Market, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) GetMarketLeaderboard(ctx context.Context, marketID int64, p dmarkets.Page) ([]*dmarkets.LeaderboardRow, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) ProjectProbability(ctx context.Context, req dmarkets.ProbabilityProjectionRequest) (*dmarkets.ProbabilityProjection, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) GetMarketDetails(ctx context.Context, marketID int64) (*dmarkets.MarketOverview, error) {
+	if m.overviews != nil {
+		if overview, ok := m.overviews[marketID]; ok {
+			return overview, nil
+		}
+		return nil, errors.New("overview not found")
+	}
+	return &dmarkets.MarketOverview{
+		Market:  &dmarkets.Market{ID: marketID},
+		Creator: &dmarkets.CreatorSummary{Username: "tester"},
+	}, nil
+}
+
+func (m *searchServiceMock) GetMarketBets(ctx context.Context, marketID int64) ([]*dmarkets.BetDisplayInfo, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) GetMarketBetsPage(ctx context.Context, marketID int64, p dmarkets.Page) ([]*dmarkets.BetDisplayInfo, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) GetPublicMarket(ctx context.Context, marketID int64) (*dmarkets.PublicMarket, error) {
+	return &dmarkets.PublicMarket{ID: marketID}, nil
+}
+
+func (m *searchServiceMock) GetMarketPositions(ctx context.Context, marketID int64) (dmarkets.MarketPositions, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) GetMarketPositionsPage(ctx context.Context, marketID int64, p dmarkets.Page) (dmarkets.MarketPositions, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) GetUserPositionInMarket(ctx context.Context, marketID int64, username string) (*dmarkets.UserPosition, error) {
+	return nil, nil
+}
+
+func (m *searchServiceMock) CalculateMarketVolume(ctx context.Context, marketID int64) (int64, error) {
+	return 0, nil
+}
+
+func TestSearchMarketsHandlerSuccess(t *testing.T) {
+	mockResult := &dmarkets.SearchResults{
+		PrimaryResults: []*dmarkets.Market{
+			{ID: 1, QuestionTitle: "Test Market", CreatorUsername: "tester"},
+		},
+		Query:         "bitcoin",
+		PrimaryStatus: "active",
+		PrimaryCount:  1,
+		TotalCount:    1,
+	}
+
+	mockSvc := &searchServiceMock{
+		result: mockResult,
+		overviews: map[int64]*dmarkets.MarketOverview{
+			1: {
+				Market: &dmarkets.Market{ID: 1, QuestionTitle: "Test Market"},
+				Creator: &dmarkets.CreatorSummary{
+					Username: "tester",
+				},
+			},
+		},
+	}
+	handler := SearchMarketsHandler(mockSvc, security.NewSecurityService())
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/markets/search?q=bitcoin&status=active&limit=5&offset=2", nil)
+	res := httptest.NewRecorder()
+
+	handler(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, res.Code)
+	}
+
+	if mockSvc.capturedQuery != "bitcoin" {
+		t.Fatalf("expected query to be sanitized value 'bitcoin', got %s", mockSvc.capturedQuery)
+	}
+
+	if mockSvc.capturedFilters.Status != "active" || mockSvc.capturedFilters.Limit != 5 || mockSvc.capturedFilters.Offset != 2 {
+		t.Fatalf("unexpected filters captured: %+v", mockSvc.capturedFilters)
+	}
+
+	var resp dto.SearchResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal raw response: %v", err)
+	}
+	if _, wrapped := raw["ok"]; wrapped {
+		t.Fatalf("success response should remain raw SearchResponse, got envelope-like body %s", res.Body.String())
+	}
+
+	if resp.TotalCount != 1 || resp.PrimaryCount != 1 {
+		t.Fatalf("expected counts to be 1, got total=%d primary=%d", resp.TotalCount, resp.PrimaryCount)
+	}
+
+	if len(resp.PrimaryResults) != 1 || resp.PrimaryResults[0].Market.ID != 1 {
+		t.Fatalf("expected primary results to include market overview, got %+v", resp.PrimaryResults)
+	}
+}
+
+func TestSearchMarketsHandlerDefaultsInvalidPaginationAtBoundary(t *testing.T) {
+	mockSvc := &searchServiceMock{
+		result: &dmarkets.SearchResults{
+			Query:      "bitcoin",
+			TotalCount: 0,
+		},
+	}
+	handler := SearchMarketsHandler(mockSvc, security.NewSecurityService())
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/markets/search?q=bitcoin&limit=abc&offset=-1", nil)
+	res := httptest.NewRecorder()
+
+	handler(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, res.Code)
+	}
+
+	if mockSvc.capturedFilters.Limit != 20 || mockSvc.capturedFilters.Offset != 0 {
+		t.Fatalf("expected boundary pagination defaults limit=20 offset=0, got %+v", mockSvc.capturedFilters)
+	}
+}
+
+func TestSearchMarketsHandlerValidation(t *testing.T) {
+	t.Run("method not allowed", func(t *testing.T) {
+		handler := SearchMarketsHandler(&searchServiceMock{}, security.NewSecurityService())
+		req := httptest.NewRequest(http.MethodPost, "/v0/markets/search", nil)
+		rr := httptest.NewRecorder()
+
+		handler(rr, req)
+		assertFailureEnvelope(t, rr, http.StatusMethodNotAllowed, handlers.ReasonMethodNotAllowed)
+	})
+
+	t.Run("missing query parameter", func(t *testing.T) {
+		handler := SearchMarketsHandler(&searchServiceMock{}, security.NewSecurityService())
+		req := httptest.NewRequest(http.MethodGet, "/v0/markets/search", nil)
+		rr := httptest.NewRecorder()
+
+		handler(rr, req)
+		assertFailureEnvelope(t, rr, http.StatusBadRequest, handlers.ReasonInvalidRequest)
+	})
+
+	t.Run("domain invalid input returns validation failure envelope", func(t *testing.T) {
+		handler := SearchMarketsHandler(&searchServiceMock{err: dmarkets.ErrInvalidInput}, security.NewSecurityService())
+		req := httptest.NewRequest(http.MethodGet, "/v0/markets/search?q=test", nil)
+		rr := httptest.NewRecorder()
+
+		handler(rr, req)
+		assertFailureEnvelope(t, rr, http.StatusBadRequest, handlers.ReasonValidationFailed)
+	})
+
+	t.Run("domain service error surfaces as server error", func(t *testing.T) {
+		handler := SearchMarketsHandler(&searchServiceMock{err: errors.New("boom")}, security.NewSecurityService())
+		req := httptest.NewRequest(http.MethodGet, "/v0/markets/search?q=test", nil)
+		rr := httptest.NewRecorder()
+
+		handler(rr, req)
+		assertFailureEnvelope(t, rr, http.StatusInternalServerError, handlers.ReasonInternalError)
+	})
+}

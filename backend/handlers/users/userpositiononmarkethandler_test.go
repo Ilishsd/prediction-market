@@ -1,0 +1,144 @@
+package usershandlers
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/gorilla/mux"
+
+	"socialpredict/handlers"
+	"socialpredict/internal/app"
+	positionsmath "socialpredict/internal/domain/math/positions"
+	authsvc "socialpredict/internal/service/auth"
+	configsvc "socialpredict/internal/service/config"
+	"socialpredict/models/modelstesting"
+)
+
+func TestUserMarketPositionHandlerReturnsUserPosition(t *testing.T) {
+	db := modelstesting.NewFakeDB(t)
+	_, _ = modelstesting.UseStandardTestEconomics(t)
+	config := modelstesting.GenerateEconomicConfig()
+	container := app.BuildApplicationWithConfigService(db, configsvc.NewStaticService(config))
+
+	t.Setenv("JWT_SIGNING_KEY", "test-secret-key")
+
+	creator := modelstesting.GenerateUser("creator", 0)
+	if err := db.Create(&creator).Error; err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+
+	market := modelstesting.GenerateMarket(7001, creator.Username)
+	if err := db.Create(&market).Error; err != nil {
+		t.Fatalf("create market: %v", err)
+	}
+
+	user := modelstesting.GenerateUser("bettor", 0)
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := db.Model(&user).Update("must_change_password", false).Error; err != nil {
+		t.Fatalf("clear must_change_password: %v", err)
+	}
+
+	other := modelstesting.GenerateUser("otherbettor", 0)
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+
+	bets := []struct {
+		amount   int64
+		outcome  string
+		username string
+		offset   time.Duration
+	}{
+		{amount: 50, outcome: "YES", username: user.Username, offset: 0},
+		{amount: 25, outcome: "NO", username: other.Username, offset: time.Second},
+	}
+
+	for _, b := range bets {
+		bet := modelstesting.GenerateBet(b.amount, b.outcome, b.username, uint(market.ID), b.offset)
+		if err := db.Create(&bet).Error; err != nil {
+			t.Fatalf("create bet: %v", err)
+		}
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, &authsvc.UserClaims{
+		Username: user.Username,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		},
+	})
+	tokenString, err := token.SignedString([]byte(os.Getenv("JWT_SIGNING_KEY")))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/userposition/"+strconv.FormatInt(market.ID, 10), nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	req = mux.SetURLVars(req, map[string]string{
+		"marketId": strconv.FormatInt(market.ID, 10),
+	})
+	rec := httptest.NewRecorder()
+
+	handler := UserMarketPositionHandlerWithService(container.GetMarketsService(), container.GetUsersService())
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	type tradePositionResponse struct {
+		positionsmath.UserMarketPosition
+		YesSellableShares int64 `json:"yesSellableShares"`
+		NoSellableShares  int64 `json:"noSellableShares"`
+		YesSellableValue  int64 `json:"yesSellableValue"`
+		NoSellableValue   int64 `json:"noSellableValue"`
+	}
+	var response handlers.SuccessEnvelope[tradePositionResponse]
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	position := response.Result
+	if position.YesSharesOwned == 0 && position.NoSharesOwned == 0 {
+		t.Fatalf("expected non-zero shares for bettor, got %+v", position)
+	}
+	if position.YesSellableShares <= 0 {
+		t.Fatalf("expected unlocked YES inventory, got %+v", position)
+	}
+	if position.NoSellableShares != 0 || position.NoSellableValue != 0 {
+		t.Fatalf("expected no unlocked NO inventory, got %+v", position)
+	}
+}
+
+func TestUserMarketPositionHandlerUnauthorizedWithoutToken(t *testing.T) {
+	db := modelstesting.NewFakeDB(t)
+	_, _ = modelstesting.UseStandardTestEconomics(t)
+	config := modelstesting.GenerateEconomicConfig()
+	container := app.BuildApplicationWithConfigService(db, configsvc.NewStaticService(config))
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/userposition/1", nil)
+	req = mux.SetURLVars(req, map[string]string{"marketId": "1"})
+	rec := httptest.NewRecorder()
+
+	handler := UserMarketPositionHandlerWithService(container.GetMarketsService(), container.GetUsersService())
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+
+	var resp handlers.FailureEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode failure envelope: %v", err)
+	}
+	if resp.Reason != string(handlers.ReasonInvalidToken) {
+		t.Fatalf("expected reason %q, got %q", handlers.ReasonInvalidToken, resp.Reason)
+	}
+}

@@ -1,0 +1,115 @@
+﻿import React from 'react';
+import { NavLink } from 'react-router-dom';
+
+const Sidebar = () => {
+  const mainLinks = [
+    {
+      to: '/',
+      label: 'Home',
+      icon: '⌂',
+      exact: true,
+    },
+    {
+      to: '/markets',
+      label: 'Markets',
+      icon: '◈',
+    },
+    {
+      to: '/stats',
+      label: 'Stats',
+      icon: '◷',
+    },
+    {
+      to: '/profile',
+      label: 'Portfolio',
+      icon: '▣',
+    },
+  ];
+
+  const categories = [
+    ['Politics', 'politics'],
+    ['Sports', 'sports'],
+    ['Crypto', 'crypto'],
+    ['Finance', 'finance'],
+    ['Tech', 'tech'],
+  ];
+
+  return (
+    <aside className="hidden md:block w-[210px] shrink-0 border-r border-gray-200 bg-white">
+      <div className="sticky top-0 h-screen overflow-y-auto px-3 py-4">
+
+        {/* Main navigation */}
+        <nav className="space-y-1">
+
+          {mainLinks.map((link) => (
+            <NavLink
+              key={link.to}
+              exact={link.exact}
+              to={link.to}
+              className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950"
+              activeClassName="bg-gray-100 text-gray-950"
+            >
+              <span className="flex w-5 items-center justify-center text-base">
+                {link.icon}
+              </span>
+
+              <span>{link.label}</span>
+            </NavLink>
+          ))}
+
+        </nav>
+
+        {/* Divider */}
+        <div className="my-5 border-t border-gray-100" />
+
+        {/* Discover */}
+        <div>
+
+          <div className="px-3 mb-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+              Discover
+            </span>
+          </div>
+
+          <nav className="space-y-1">
+
+            {categories.map(([label, slug]) => (
+              <NavLink
+                key={slug}
+                to={`/markets/topic/${slug}`}
+                className="flex items-center rounded-lg px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950"
+                activeClassName="bg-gray-100 text-gray-950"
+              >
+                {label}
+              </NavLink>
+            ))}
+
+          </nav>
+
+        </div>
+
+        {/* Divider */}
+        <div className="my-5 border-t border-gray-100" />
+
+        {/* Create */}
+        <NavLink
+          to="/create"
+          className="flex items-center justify-center rounded-lg border border-gray-200 px-3 py-2.5 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50"
+        >
+          + Create market
+        </NavLink>
+
+        {/* Bottom */}
+        <div className="mt-6 px-3 text-xs text-gray-400">
+          <div>SocialPredict</div>
+          <div className="mt-1">
+            Prediction Markets
+          </div>
+        </div>
+
+      </div>
+    </aside>
+  );
+};
+
+export default Sidebar;

@@ -1,0 +1,712 @@
+package markets
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+
+	"socialpredict/internal/domain/boundary"
+	dmarkets "socialpredict/internal/domain/markets"
+	positionsmath "socialpredict/internal/domain/math/positions"
+	"socialpredict/models"
+
+	"gorm.io/gorm"
+)
+
+// GormRepository implements the markets domain repository interface using GORM
+type GormRepository struct {
+	db *gorm.DB
+}
+
+// NewGormRepository creates a new GORM-based markets repository
+func NewGormRepository(db *gorm.DB) *GormRepository {
+	return &GormRepository{db: db}
+}
+
+// Create creates a new market in the database
+func (r *GormRepository) Create(ctx context.Context, market *dmarkets.Market) error {
+	dbMarket := r.domainToModel(market)
+
+	result := r.db.WithContext(ctx).Create(&dbMarket)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	// Update the domain model with the generated ID
+	market.ID = dbMarket.ID
+	return nil
+}
+
+// GetByID retrieves a market by its ID
+func (r *GormRepository) GetByID(ctx context.Context, id int64) (*dmarkets.Market, error) {
+	var dbMarket models.Market
+
+	err := r.db.WithContext(ctx).First(&dbMarket, id).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, dmarkets.ErrMarketNotFound
+		}
+		return nil, err
+	}
+
+	market := r.modelToDomain(&dbMarket)
+	if err := r.hydrateTagsForMarkets(ctx, []*dmarkets.Market{market}); err != nil {
+		return nil, err
+	}
+	return market, nil
+}
+
+// GetPublicMarket retrieves a market with public-facing attributes.
+func (r *GormRepository) GetPublicMarket(ctx context.Context, marketID int64) (*dmarkets.PublicMarket, error) {
+	var market models.Market
+	if err := publicLifecycleScope(r.db.WithContext(ctx)).First(&market, marketID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, dmarkets.ErrMarketNotFound
+		}
+		return nil, err
+	}
+
+	domainMarket := r.modelToDomain(&market)
+	if err := r.hydrateTagsForMarkets(ctx, []*dmarkets.Market{domainMarket}); err != nil {
+		return nil, err
+	}
+	return &dmarkets.PublicMarket{
+		ID:                      market.ID,
+		QuestionTitle:           market.QuestionTitle,
+		Description:             market.Description,
+		OutcomeType:             market.OutcomeType,
+		ResolutionDateTime:      market.ResolutionDateTime,
+		FinalResolutionDateTime: market.FinalResolutionDateTime,
+		UTCOffset:               market.UTCOffset,
+		IsResolved:              market.IsResolved,
+		ResolutionResult:        market.ResolutionResult,
+		InitialProbability:      market.InitialProbability,
+		CreatorUsername:         market.CreatorUsername,
+		StewardUsername:         domainMarket.CurrentStewardUsername(),
+		CreatedAt:               market.CreatedAt,
+		YesLabel:                market.YesLabel,
+		NoLabel:                 market.NoLabel,
+		Status:                  domainMarket.Status,
+		LifecycleStatus:         dmarkets.NormalizeLifecycleStatus(market.LifecycleStatus),
+		Tags:                    domainMarket.Tags,
+	}, nil
+}
+
+// UpdateLabels updates the yes and no labels for a market
+func (r *GormRepository) UpdateLabels(ctx context.Context, id int64, yesLabel, noLabel string) error {
+	result := r.db.WithContext(ctx).Model(&models.Market{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"yes_label":  yesLabel,
+			"no_label":   noLabel,
+			"updated_at": time.Now(),
+		})
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if result.RowsAffected == 0 {
+		return dmarkets.ErrMarketNotFound
+	}
+
+	return nil
+}
+
+// List retrieves markets with the given filters
+func (r *GormRepository) List(ctx context.Context, filters dmarkets.ListFilters) ([]*dmarkets.Market, error) {
+	query := r.db.WithContext(ctx).Model(&models.Market{})
+
+	query = applyListStatusFilter(query, filters.Status)
+	query = applyCreatedByFilter(query, filters.CreatedBy)
+	query = applyOwnedByFilter(query, filters.OwnedBy)
+	query = applyTagSlugFilter(query, filters.TagSlug)
+	query = applyPagination(query, filters.Limit, filters.Offset)
+	query = query.Order("markets.created_at DESC")
+
+	var dbMarkets []models.Market
+	if err := query.Find(&dbMarkets).Error; err != nil {
+		return nil, err
+	}
+
+	markets := r.mapMarkets(dbMarkets)
+	if err := r.hydrateTagsForMarkets(ctx, markets); err != nil {
+		return nil, err
+	}
+	return markets, nil
+}
+
+// ListByStatus retrieves markets filtered by status with pagination
+func (r *GormRepository) ListByStatus(ctx context.Context, status string, p dmarkets.Page) ([]*dmarkets.Market, error) {
+	query := r.db.WithContext(ctx).Model(&models.Market{})
+
+	query = applyStatusByResolution(query, status, time.Now())
+	query = applyPagination(query, p.Limit, p.Offset)
+	query = query.Order("markets.created_at DESC")
+
+	var dbMarkets []models.Market
+	if err := query.Find(&dbMarkets).Error; err != nil {
+		return nil, err
+	}
+
+	markets := r.mapMarkets(dbMarkets)
+	if err := r.hydrateTagsForMarkets(ctx, markets); err != nil {
+		return nil, err
+	}
+	return markets, nil
+}
+
+// ListByLifecycle retrieves lifecycle queues that are intentionally excluded
+// from the public market listing scope.
+func (r *GormRepository) ListByLifecycle(ctx context.Context, filters dmarkets.ListFilters) ([]*dmarkets.Market, error) {
+	query := r.db.WithContext(ctx).Model(&models.Market{})
+
+	query = applyLifecycleAdminStatusFilter(query, filters.Status)
+	query = applyLifecycleSearchTerm(query, filters.Query)
+	query = applyCreatedByFilter(query, filters.CreatedBy)
+	query = applyOwnedByFilter(query, filters.OwnedBy)
+	query = applyPagination(query, filters.Limit, filters.Offset)
+	query = query.Order("markets.created_at DESC")
+
+	var dbMarkets []models.Market
+	if err := query.Find(&dbMarkets).Error; err != nil {
+		return nil, err
+	}
+
+	markets := r.mapMarkets(dbMarkets)
+	if err := r.hydrateTagsForMarkets(ctx, markets); err != nil {
+		return nil, err
+	}
+	if err := r.hydrateStewardshipAudits(ctx, markets); err != nil {
+		return nil, err
+	}
+	return markets, nil
+}
+
+func applyLifecycleAdminStatusFilter(query *gorm.DB, status string) *gorm.DB {
+	normalized := dmarkets.NormalizeLifecycleStatus(status)
+	switch normalized {
+	case dmarkets.MarketStatusAll:
+		return query.Where(
+			"markets.lifecycle_status IN ? OR markets.lifecycle_status = '' OR markets.lifecycle_status IS NULL",
+			[]string{
+				dmarkets.MarketLifecycleProposed,
+				dmarkets.MarketLifecyclePublished,
+				dmarkets.MarketLifecycleClosed,
+				dmarkets.MarketLifecycleResolved,
+			},
+		)
+	case dmarkets.MarketLifecycleClosed:
+		return query.Where("markets.lifecycle_status = ? OR (markets.lifecycle_status = ? AND markets.is_resolved = ? AND markets.resolution_date_time <= ?)",
+			dmarkets.MarketLifecycleClosed,
+			dmarkets.MarketLifecyclePublished,
+			false,
+			time.Now(),
+		)
+	case dmarkets.MarketLifecycleResolved:
+		return query.Where("markets.is_resolved = ? OR markets.lifecycle_status = ?", true, dmarkets.MarketLifecycleResolved)
+	default:
+		return query.Where("markets.lifecycle_status = ?", normalized)
+	}
+}
+
+func applyLifecycleSearchTerm(query *gorm.DB, value string) *gorm.DB {
+	term := strings.TrimSpace(value)
+	if term == "" {
+		return query
+	}
+	return applySearchTerm(query, term)
+}
+
+func applyListStatusFilter(query *gorm.DB, status string) *gorm.DB {
+	return applyStatusByResolution(query, status, time.Now())
+}
+
+func applyCreatedByFilter(query *gorm.DB, createdBy string) *gorm.DB {
+	if createdBy == "" {
+		return query
+	}
+	return query.Where("markets.creator_username = ?", createdBy)
+}
+
+func applyOwnedByFilter(query *gorm.DB, ownedBy string) *gorm.DB {
+	ownedBy = strings.TrimSpace(ownedBy)
+	if ownedBy == "" {
+		return query
+	}
+	return query.Where("COALESCE(NULLIF(markets.steward_username, ''), markets.creator_username) = ?", ownedBy)
+}
+
+func applyTagSlugFilter(query *gorm.DB, tagSlug string) *gorm.DB {
+	tagSlug = strings.Trim(strings.ToLower(strings.TrimSpace(tagSlug)), "-")
+	if tagSlug == "" {
+		return query
+	}
+	return query.
+		Joins("JOIN market_tag_assignments ON market_tag_assignments.market_id = markets.id AND market_tag_assignments.deleted_at IS NULL").
+		Joins("JOIN market_tags ON market_tags.id = market_tag_assignments.tag_id AND market_tags.deleted_at IS NULL").
+		Where("market_tags.slug = ?", tagSlug).
+		Distinct("markets.*")
+}
+
+func applyStatusByResolution(query *gorm.DB, status string, now time.Time) *gorm.DB {
+	switch status {
+	case dmarkets.MarketStatusActive:
+		return publicLifecycleScope(query).Where("markets.is_resolved = ? AND markets.resolution_date_time > ?", false, now)
+	case dmarkets.MarketStatusClosed:
+		return publicLifecycleScope(query).Where("markets.is_resolved = ? AND markets.resolution_date_time <= ?", false, now)
+	case dmarkets.MarketStatusResolved:
+		return publicLifecycleScope(query).Where("markets.is_resolved = ? OR markets.lifecycle_status = ?", true, dmarkets.MarketLifecycleResolved)
+	default:
+		return publicLifecycleScope(query)
+	}
+}
+
+// Search searches for markets by query string
+func (r *GormRepository) Search(ctx context.Context, query string, filters dmarkets.SearchFilters) ([]*dmarkets.Market, error) {
+	dbQuery := r.db.WithContext(ctx).Model(&models.Market{})
+
+	dbQuery = applySearchTerm(dbQuery, query)
+	dbQuery = applyStatusFilter(dbQuery, filters.Status)
+	dbQuery = applyTagSlugFilter(dbQuery, filters.TagSlug)
+	dbQuery = applyPagination(dbQuery, filters.Limit, filters.Offset)
+	dbQuery = dbQuery.Order("markets.created_at DESC")
+
+	var dbMarkets []models.Market
+	if err := dbQuery.Find(&dbMarkets).Error; err != nil {
+		return nil, err
+	}
+
+	markets := r.mapMarkets(dbMarkets)
+	if err := r.hydrateTagsForMarkets(ctx, markets); err != nil {
+		return nil, err
+	}
+	return markets, nil
+}
+
+func applySearchTerm(dbQuery *gorm.DB, query string) *gorm.DB {
+	searchTerm := strings.ToLower(query)
+	searchPattern := "%" + searchTerm + "%"
+	return dbQuery.Where("(LOWER(markets.question_title) LIKE ? OR LOWER(markets.description) LIKE ?)", searchPattern, searchPattern)
+}
+
+func applyStatusFilter(dbQuery *gorm.DB, status string) *gorm.DB {
+	if status == "" || status == dmarkets.MarketStatusAll {
+		return publicLifecycleScope(dbQuery)
+	}
+
+	now := time.Now()
+	switch status {
+	case dmarkets.MarketStatusActive:
+		return publicLifecycleScope(dbQuery).Where("markets.is_resolved = ? AND markets.resolution_date_time > ?", false, now)
+	case dmarkets.MarketStatusClosed:
+		return publicLifecycleScope(dbQuery).Where("markets.is_resolved = ? AND markets.resolution_date_time <= ?", false, now)
+	case dmarkets.MarketStatusResolved:
+		return publicLifecycleScope(dbQuery).Where("markets.is_resolved = ? OR markets.lifecycle_status = ?", true, dmarkets.MarketLifecycleResolved)
+	default:
+		return publicLifecycleScope(dbQuery)
+	}
+}
+
+func publicLifecycleScope(query *gorm.DB) *gorm.DB {
+	return query.Where("markets.lifecycle_status = ? OR markets.lifecycle_status = ? OR markets.lifecycle_status = '' OR markets.lifecycle_status IS NULL",
+		dmarkets.MarketLifecyclePublished,
+		dmarkets.MarketLifecycleResolved,
+	)
+}
+
+func applyPagination(dbQuery *gorm.DB, limit, offset int) *gorm.DB {
+	if limit > 0 {
+		dbQuery = dbQuery.Limit(limit)
+	}
+
+	if offset > 0 {
+		dbQuery = dbQuery.Offset(offset)
+	}
+	return dbQuery
+}
+
+func (r *GormRepository) mapMarkets(dbMarkets []models.Market) []*dmarkets.Market {
+	markets := make([]*dmarkets.Market, len(dbMarkets))
+	for i, dbMarket := range dbMarkets {
+		markets[i] = r.modelToDomain(&dbMarket)
+	}
+	return markets
+}
+
+func (r *GormRepository) hydrateStewardshipAudits(ctx context.Context, markets []*dmarkets.Market) error {
+	if len(markets) == 0 {
+		return nil
+	}
+
+	marketIDs := make([]int64, 0, len(markets))
+	marketByID := make(map[int64]*dmarkets.Market, len(markets))
+	for _, market := range markets {
+		if market == nil {
+			continue
+		}
+		marketIDs = append(marketIDs, market.ID)
+		marketByID[market.ID] = market
+	}
+	if len(marketIDs) == 0 {
+		return nil
+	}
+
+	var dbAudits []models.MarketStewardshipAudit
+	if err := r.db.WithContext(ctx).
+		Where("market_id IN ?", marketIDs).
+		Order("created_at ASC, id ASC").
+		Find(&dbAudits).Error; err != nil {
+		return err
+	}
+
+	for _, dbAudit := range dbAudits {
+		market := marketByID[dbAudit.MarketID]
+		if market == nil {
+			continue
+		}
+		market.StewardshipAudits = append(market.StewardshipAudits, dmarkets.MarketStewardshipAuditRecord{
+			ID:                  dbAudit.ID,
+			MarketID:            dbAudit.MarketID,
+			FromStewardUsername: dbAudit.FromStewardUsername,
+			ToStewardUsername:   dbAudit.ToStewardUsername,
+			ActorUsername:       dbAudit.ActorUsername,
+			Reason:              dbAudit.Reason,
+			CreatedAt:           dbAudit.CreatedAt,
+		})
+	}
+	return nil
+}
+
+// GetUserPosition retrieves the aggregated position for a specific user in a market.
+func (r *GormRepository) GetUserPosition(ctx context.Context, marketID int64, username string) (*dmarkets.UserPosition, error) {
+	snapshot, bets, err := r.loadMarketData(ctx, marketID)
+	if err != nil {
+		return nil, err
+	}
+
+	position, err := positionsmath.CalculateMarketPositionForUser_WPAM_DBPM(snapshot, bets, username)
+	if err != nil {
+		return nil, err
+	}
+
+	return &dmarkets.UserPosition{
+		Username:         username,
+		MarketID:         marketID,
+		YesSharesOwned:   position.YesSharesOwned,
+		NoSharesOwned:    position.NoSharesOwned,
+		Value:            position.Value,
+		TotalSpent:       position.TotalSpent,
+		TotalSpentInPlay: position.TotalSpentInPlay,
+		IsResolved:       position.IsResolved,
+		ResolutionResult: position.ResolutionResult,
+	}, nil
+}
+
+// ListMarketPositions retrieves aggregated positions for all users in a market.
+func (r *GormRepository) ListMarketPositions(ctx context.Context, marketID int64) (dmarkets.MarketPositions, error) {
+	snapshot, bets, err := r.loadMarketData(ctx, marketID)
+	if err != nil {
+		return nil, err
+	}
+
+	positions, err := positionsmath.CalculateMarketPositions_WPAM_DBPM(snapshot, bets)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(dmarkets.MarketPositions, 0, len(positions))
+	for _, pos := range positions {
+		out = append(out, &dmarkets.UserPosition{
+			Username:         pos.Username,
+			MarketID:         int64(pos.MarketID),
+			YesSharesOwned:   pos.YesSharesOwned,
+			NoSharesOwned:    pos.NoSharesOwned,
+			Value:            pos.Value,
+			TotalSpent:       pos.TotalSpent,
+			TotalSpentInPlay: pos.TotalSpentInPlay,
+			IsResolved:       pos.IsResolved,
+			ResolutionResult: pos.ResolutionResult,
+		})
+	}
+	return out, nil
+}
+
+// Delete removes a market from the database
+func (r *GormRepository) Delete(ctx context.Context, id int64) error {
+	result := r.db.WithContext(ctx).Delete(&models.Market{}, id)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if result.RowsAffected == 0 {
+		return dmarkets.ErrMarketNotFound
+	}
+
+	return nil
+}
+
+// ResolveMarket marks a market as resolved with the given resolution
+func (r *GormRepository) ResolveMarket(ctx context.Context, id int64, resolution string) error {
+	result := r.db.WithContext(ctx).Model(&models.Market{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"is_resolved":                true,
+			"lifecycle_status":           dmarkets.MarketLifecycleResolved,
+			"resolution_result":          resolution,
+			"final_resolution_date_time": time.Now(),
+			"updated_at":                 time.Now(),
+		})
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if result.RowsAffected == 0 {
+		return dmarkets.ErrMarketNotFound
+	}
+
+	return nil
+}
+
+// ApproveMarket publishes a proposed market and records admin approval metadata.
+func (r *GormRepository) ApproveMarket(ctx context.Context, id int64, actorUsername string, approvedAt time.Time) error {
+	result := r.db.WithContext(ctx).Model(&models.Market{}).
+		Where("id = ? AND lifecycle_status = ?", id, dmarkets.MarketLifecycleProposed).
+		Updates(map[string]any{
+			"lifecycle_status": dmarkets.MarketLifecyclePublished,
+			"approved_by":      actorUsername,
+			"approved_at":      approvedAt,
+			"rejected_by":      "",
+			"rejected_at":      nil,
+			"rejection_reason": "",
+			"updated_at":       approvedAt,
+		})
+
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return dmarkets.ErrInvalidState
+	}
+	return nil
+}
+
+// RejectMarket rejects a proposed market and records admin rejection metadata.
+func (r *GormRepository) RejectMarket(ctx context.Context, id int64, actorUsername string, rejectedAt time.Time, reason string) error {
+	result := r.db.WithContext(ctx).Model(&models.Market{}).
+		Where("id = ? AND lifecycle_status = ?", id, dmarkets.MarketLifecycleProposed).
+		Updates(map[string]any{
+			"lifecycle_status": dmarkets.MarketLifecycleRejected,
+			"rejected_by":      actorUsername,
+			"rejected_at":      rejectedAt,
+			"rejection_reason": reason,
+			"updated_at":       rejectedAt,
+		})
+
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return dmarkets.ErrInvalidState
+	}
+	return nil
+}
+
+// ReassignMarketSteward updates the current steward and records an audit fact atomically.
+func (r *GormRepository) ReassignMarketSteward(ctx context.Context, marketID int64, fromStewardUsername string, toStewardUsername string, actorUsername string, reason string, changedAt time.Time) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.Market{}).
+			Where("id = ?", marketID).
+			Updates(map[string]any{
+				"steward_username": toStewardUsername,
+				"updated_at":       changedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return dmarkets.ErrMarketNotFound
+		}
+
+		audit := models.MarketStewardshipAudit{
+			MarketID:            marketID,
+			FromStewardUsername: fromStewardUsername,
+			ToStewardUsername:   toStewardUsername,
+			ActorUsername:       actorUsername,
+			Reason:              reason,
+		}
+		audit.CreatedAt = changedAt
+		audit.UpdatedAt = changedAt
+		return tx.Create(&audit).Error
+	})
+}
+
+// ListBetsForMarket returns all bets for the specified market ordered by placement time.
+func (r *GormRepository) ListBetsForMarket(ctx context.Context, marketID int64) ([]*dmarkets.Bet, error) {
+	var bets []models.Bet
+	if err := r.db.WithContext(ctx).
+		Model(&models.Bet{}).
+		Select("bets.*").
+		Where("market_id = ?", marketID).
+		Order("placed_at ASC").
+		Find(&bets).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]*dmarkets.Bet, len(bets))
+	for i := range bets {
+		result[i] = &dmarkets.Bet{
+			ID:        bets[i].ID,
+			Username:  bets[i].Username,
+			MarketID:  bets[i].MarketID,
+			Amount:    bets[i].Amount,
+			Outcome:   bets[i].Outcome,
+			PlacedAt:  bets[i].PlacedAt,
+			CreatedAt: bets[i].CreatedAt,
+		}
+	}
+	return result, nil
+}
+
+// CalculatePayoutPositions computes the resolved valuations for a market's participants.
+func (r *GormRepository) CalculatePayoutPositions(ctx context.Context, marketID int64) ([]*dmarkets.PayoutPosition, error) {
+	snapshot, bets, err := r.loadMarketData(ctx, marketID)
+	if err != nil {
+		return nil, err
+	}
+
+	positions, err := positionsmath.CalculateMarketPositions_WPAM_DBPM(snapshot, bets)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]*dmarkets.PayoutPosition, 0, len(positions))
+	for _, pos := range positions {
+		result = append(result, &dmarkets.PayoutPosition{
+			Username: pos.Username,
+			Value:    pos.Value,
+		})
+	}
+	return result, nil
+}
+
+func (r *GormRepository) loadMarketData(ctx context.Context, marketID int64) (positionsmath.MarketSnapshot, []boundary.Bet, error) {
+	var market models.Market
+	if err := r.db.WithContext(ctx).First(&market, marketID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return positionsmath.MarketSnapshot{}, nil, dmarkets.ErrMarketNotFound
+		}
+		return positionsmath.MarketSnapshot{}, nil, err
+	}
+
+	var bets []models.Bet
+	if err := r.db.WithContext(ctx).
+		Model(&models.Bet{}).
+		Select("bets.*").
+		Where("market_id = ?", marketID).
+		Order("placed_at ASC").
+		Find(&bets).Error; err != nil {
+		return positionsmath.MarketSnapshot{}, nil, err
+	}
+
+	snapshot := positionsmath.MarketSnapshot{
+		ID:               int64(market.ID),
+		CreatedAt:        market.CreatedAt,
+		IsResolved:       market.IsResolved,
+		ResolutionResult: market.ResolutionResult,
+	}
+
+	return snapshot, mapModelBetsToBoundary(bets), nil
+}
+
+func mapModelBetsToBoundary(dbBets []models.Bet) []boundary.Bet {
+	bets := make([]boundary.Bet, len(dbBets))
+	for i, bet := range dbBets {
+		bets[i] = boundary.Bet{
+			ID:        uint(bet.ID),
+			Username:  bet.Username,
+			MarketID:  bet.MarketID,
+			Amount:    bet.Amount,
+			Outcome:   bet.Outcome,
+			PlacedAt:  bet.PlacedAt,
+			CreatedAt: bet.CreatedAt,
+		}
+	}
+	return bets
+}
+
+// domainToModel converts a domain market to a GORM model
+func (r *GormRepository) domainToModel(market *dmarkets.Market) models.Market {
+	lifecycle := market.LifecycleStatus
+	if lifecycle == "" {
+		lifecycle = dmarkets.LifecycleFromPublicStatus(market.Status)
+	}
+	lifecycle = dmarkets.NormalizeLifecycleStatus(lifecycle)
+
+	return models.Market{
+		ID:                      market.ID,
+		QuestionTitle:           market.QuestionTitle,
+		Description:             market.Description,
+		OutcomeType:             market.OutcomeType,
+		ResolutionDateTime:      market.ResolutionDateTime,
+		FinalResolutionDateTime: market.FinalResolutionDateTime,
+		ResolutionResult:        market.ResolutionResult,
+		CreatorUsername:         market.CreatorUsername,
+		StewardUsername:         market.CurrentStewardUsername(),
+		YesLabel:                market.YesLabel,
+		NoLabel:                 market.NoLabel,
+		UTCOffset:               market.UTCOffset,
+		LifecycleStatus:         lifecycle,
+		ApprovedBy:              market.ApprovedBy,
+		ApprovedAt:              market.ApprovedAt,
+		RejectedBy:              market.RejectedBy,
+		RejectedAt:              market.RejectedAt,
+		RejectionReason:         market.RejectionReason,
+		ProposalCost:            market.ProposalCost,
+		IsResolved:              market.Status == dmarkets.MarketStatusResolved || lifecycle == dmarkets.MarketLifecycleResolved,
+		InitialProbability:      market.InitialProbability,
+	}
+}
+
+// modelToDomain converts a GORM model to a domain market
+func (r *GormRepository) modelToDomain(dbMarket *models.Market) *dmarkets.Market {
+	lifecycle := dmarkets.NormalizeLifecycleStatus(dbMarket.LifecycleStatus)
+	status := dmarkets.PublicStatusFromLifecycle(lifecycle, dbMarket.IsResolved, dbMarket.ResolutionDateTime, time.Now())
+
+	return &dmarkets.Market{
+		ID:                      dbMarket.ID,
+		QuestionTitle:           dbMarket.QuestionTitle,
+		Description:             dbMarket.Description,
+		OutcomeType:             dbMarket.OutcomeType,
+		ResolutionDateTime:      dbMarket.ResolutionDateTime,
+		FinalResolutionDateTime: dbMarket.FinalResolutionDateTime,
+		ResolutionResult:        dbMarket.ResolutionResult,
+		CreatorUsername:         dbMarket.CreatorUsername,
+		StewardUsername:         dbMarket.StewardUsername,
+		YesLabel:                dbMarket.YesLabel,
+		NoLabel:                 dbMarket.NoLabel,
+		Status:                  status,
+		LifecycleStatus:         lifecycle,
+		ApprovedBy:              dbMarket.ApprovedBy,
+		ApprovedAt:              cloneTimePtr(dbMarket.ApprovedAt),
+		RejectedBy:              dbMarket.RejectedBy,
+		RejectedAt:              cloneTimePtr(dbMarket.RejectedAt),
+		RejectionReason:         dbMarket.RejectionReason,
+		ProposalCost:            dbMarket.ProposalCost,
+		CreatedAt:               dbMarket.CreatedAt,
+		UpdatedAt:               dbMarket.UpdatedAt,
+		InitialProbability:      dbMarket.InitialProbability,
+		UTCOffset:               dbMarket.UTCOffset,
+		Tags:                    []dmarkets.MarketTag{},
+	}
+}
+
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}

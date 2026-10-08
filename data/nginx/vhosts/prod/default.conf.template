@@ -1,0 +1,51 @@
+server {
+	gzip on;
+	gzip_min_length 1000;
+	gunzip on;
+	gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+	listen 80;
+	server_name ${DOMAIN};
+
+	# Backend-owned infra probes are published deliberately at root so
+	# deployment checks do not rely on frontend routing or /api/ prefixing.
+	location = /health {
+		proxy_pass http://backend:8080;
+	}
+
+	location = /readyz {
+		proxy_pass http://backend:8080;
+	}
+
+	location = /ops/status {
+		proxy_pass http://backend:8080;
+	}
+
+	# Backend-owned API docs are published deliberately at root. Do not
+	# hide these behind /api/ or serve a duplicate Swagger copy from frontend.
+	location = /openapi.yaml {
+		proxy_pass http://backend:8080;
+	}
+
+	location = /swagger {
+		proxy_pass http://backend:8080;
+	}
+
+	location /swagger/ {
+		proxy_pass http://backend:8080;
+	}
+	
+	location /api/ {
+		proxy_pass http://backend:8080/;
+	}
+
+	# Public market pages are served by the backend share shell first so
+	# crawlers receive Open Graph metadata before the SPA hydrates.
+	location ~ ^/markets/[0-9]+$ {
+		proxy_pass http://backend:8080;
+	}
+
+	location / {
+		proxy_pass http://frontend:80;
+	}
+}

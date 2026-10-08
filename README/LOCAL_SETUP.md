@@ -1,0 +1,173 @@
+## Repo Purpose
+
+For more information about the project go to: [SocialPredict](https://github.com/openpredictionmarkets/socialpredict)
+
+### Supported Systems
+
+Currently, the project is supported on Ubuntu up to 23.10 LTS and MacOS. Windows users will need to install Ubuntu on WSL2. [Here is the link to the WSL installation guide.](https://learn.microsoft.com/en-us/windows/wsl/install) Docker assumes you will install it on WSL2. **We cannot guarantee that everything here will work with WSL2. WSL1 support is untested**.
+
+### Setting Up the Project on Your Local Machine
+
+#### Prerequisites
+
+##### MacOS
+
+* Beyond docker as discussed below, you may also need to install `gettext` with: `brew install gettext` to get access to `envsubst` to run the install script.
+* You may also need to create a data file, which is in the `.gitignore`, as MacOS docker may not create this automatically upon installation. You might have to run the following commands from the main `./socialpredict` directory:
+
+```
+mkdir -p data/postgres data/certbot
+chown -R $(whoami):staff data
+```
+
+* For newer versions of MacOS, Apple adds some `xattrs` which maintain provenance over the files, not allowing Docker to work with them directly on the disk. Hence, we have to mount our database from local on development mode. See [here](https://developer.apple.com/forums/thread/723397).
+
+#### Instructions
+
+- **Clone the Repository**: Download the repository to your local machine.
+-- `git clone https://github.com/openpredictionmarkets/socialpredict.git`
+- **Install Docker**: Install Docker on your local machine. [Here is the link to the Docker installation guide.](https://docs.docker.com/get-docker/) We are assuming the latest version of Docker as of the date of this document. Windows users will need to follow the instructions for installing Docker on WSL2. [Here is the link to set up the Docker Desktop backend on WSL2.](https://docs.docker.com/desktop/wsl/)
+- **Install docker compose**: Install `docker compose` on your local machine. [Here is the link to the docker compose installation guide](https://docs.docker.com/compose/install/). We are assuming the latest version of docker compose as of the date of this document. NOTE: `docker-compose` is deprecated and the command to use should be `docker compose`.
+- If you have not run this previously, within the root of the `./socialpredict` directory, create a `.env` file which will be ignored in the gitignore.
+- Within the root of the `./socialpredict` repo, run the command, `./SocialPredict install`.
+- Select (1) Development, then select to rebuild the `.env` file and rebuild the images.
+- When this has completed, run `./SocialPredict up`...this will use `docker compose` to spin up the images into containers on your machine.
+- Once this is fully up and running, you can then visit `localhost` and log in to use the app.
+
+#### Use the following login credentials:
+
+- Access the API at `localhost` in your browser
+- Sign in with the following Username/Password:
+- Username: `admin`
+- Password: `password`
+- Navigate to "Dashboard" and create a new user
+- Log in as the new user
+- Change the default password
+- Log back out
+- Log back in with your new password
+- The new user will have an initial account balance and maximum debt as configured in `setup.yaml`. **You can configure `setup.yaml` yourself, but must do so prior to installing SocialPredict**.
+
+#### Optional Development Bootstrap Users
+
+After installing in Development mode and starting the containers with `./SocialPredict up`, you can reset a predictable local test login set:
+
+```bash
+./SocialPredict dev-bootstrap-users
+```
+
+This command refuses to run unless `.env` has `APP_ENV=development`. By default it creates or updates:
+
+- `admin`
+- `testuser01` as an active moderator fixture
+- `testuser02` through `testuser10` as regular users
+- `Market A`, `Market B`, and `Market C` as published, tradable markets owned/stewarded by `testuser01`
+- `Category A`, `Category B`, and `Category C` tags assigned to those fixture markets
+
+All bootstrapped users receive password `password` and `must_change_password=false`. You can customize the test user count or prefix:
+
+```bash
+./SocialPredict dev-bootstrap-users --count 20 --prefix player
+```
+
+### Shutting down the service:
+
+- To shut down the service, navigate to the `./socialpredict` root directory in your terminal.
+- Run `./SocialPredict down`, which will use `docker compose down` to stop services.
+- The data in the database will be maintained for the next run.
+
+### Development Tools and Troubleshooting
+
+#### Entering a Container
+
+##### Database
+
+* Log into the psql service directly:
+
+```
+docker exec -it -e PGPASSWORD=password socialpredict-postgres-container psql -U user -d socialpredict_db
+```
+
+* The postgres data is stored locally at `./data/postgres` and is mounted by `./scripts/docker-compose-dev.yaml` with:
+
+```
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+```
+
+* The database on dev can be completely deleted and rebooted with the following, from `./` (root):
+
+1. `./SocialPredict down`
+2. `rm -rf ./data/postgres/*`
+3. `./SocialPredict up`
+
+##### Getting Logs from Different Containers
+
+* There are different containers which serve different purposes in our app, and `docker compose` is used to spin them all up and hook them together. If something goes wrong in the app, you can use `./SocialPredict logs all` to view logs from all of the containers.
+
+* For the most common case, it is easier to use the top-level command directly against one service:
+
+```
+./SocialPredict logs
+./SocialPredict logs options
+./SocialPredict logs <service>
+```
+
+* To follow logs live, add `-f` or `--follow`:
+
+```
+./SocialPredict logs <service> -f
+```
+
+* The available service names come from the active compose file, and `options` will show the current service-to-container mapping:
+
+```
+./SocialPredict logs options
+```
+
+* To show usage and examples:
+
+```
+./SocialPredict logs options
+./SocialPredict logs help
+./SocialPredict logs --help
+```
+
+* The older compose-wide pattern still works when you specifically want to grep across all services:
+
+```
+docker compose -p scripts logs | grep backend
+docker compose -p scripts logs | grep frontend
+docker compose -p scripts logs | grep nginx
+docker compose -p scripts logs | grep postgres
+```
+
+### Backing Up Database On Local Prior to Change
+
+* There may be instances in which you want to backup your database on local prior to implementing a new feature or fix coming in from a different branch, so that a desired state can be restored if the change or fix didn't work.
+
+Here are two quick steps to backup and restore your database:
+
+#### Backup
+
+```
+docker exec socialpredict-postgres-container sh -c 'pg_dump -U user -F c socialpredict_db' > backup_before_resolution.dump 2> pgdump_error.log
+```
+
+* This will create an error log at pgdump_error.log which you can inspect in case there are any problems.
+
+#### Restore
+
+```
+# Drop and recreate DB
+docker exec -it socialpredict-postgres-container psql -U user -c "DROP DATABASE socialpredict_db;"
+docker exec -it socialpredict-postgres-container psql -U user -c "CREATE DATABASE socialpredict_db;"
+
+# Restore
+cat backup_before_resolution.dump | docker exec -i socialpredict-postgres-container pg_restore --no-owner -U user -d socialpredict_db
+```
+
+### Setting Up a Staging Instance On the Web
+
+While we don't like to say we have an official, "prod," version yet per se, we do give the ability for you to run an staging instance online which for all intents and purposes is a functioning web app. However we don't endorse this app as being completely secure and recoverable without extra work. We're working on getting SocialPredict in a more reliable, secure state.
+
+See [Stage Setup](/README/STAGE_SETUP.md)

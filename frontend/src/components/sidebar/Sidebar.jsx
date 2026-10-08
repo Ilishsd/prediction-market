@@ -1,0 +1,307 @@
+import React, { useState, useEffect } from 'react';
+import { Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../../helpers/AuthContent'
+import useUserCredit from '../utils/userFinanceTools/FetchUserCredit';
+import LoginModalButton from '../modals/login/LoginModalClick';
+import {
+  AboutSVG,
+  AdminGearSVG,
+  CoinsSVG,
+  HomeSVG,
+  LockPasswordSVG,
+  LogoutSVG,
+  MarketsSVG,
+  MenuGrowSVG,
+  MenuShrinkSVG,
+  ProfileSVG,
+  CreateSVG,
+  StatsSVG,
+} from '../../assets/components/SvgIcons';
+import useFrontendConfig from '../../hooks/useFrontendConfig';
+import {
+  getPendingAdminReviewCounts,
+  totalPendingReviewCount,
+} from '../../api/adminReviewCountsApi';
+
+const SidebarBadge = ({ value }) => {
+  if (!value) return null;
+  return (
+    <span className="ml-auto rounded-full bg-primary-pink px-2 py-0.5 text-[10px] font-bold leading-none text-white">
+      {value > 99 ? '99+' : value}
+    </span>
+  );
+};
+
+const SidebarLink = ({ to, icon: Icon, children, onClick, badge = 0 }) => (
+  <li>
+    <Link
+      to={to}
+      className='flex items-center p-2 text-gray-300 rounded-lg hover:bg-gray-700 group transition-colors duration-200'
+      onClick={onClick}
+    >
+      <Icon className='w-5 h-5 text-gray-400 group-hover:text-white transition-colors duration-200' />
+      <span className='ml-3 text-sm'>{children}</span>
+      <SidebarBadge value={badge} />
+    </Link>
+  </li>
+);
+
+const Sidebar = () => {
+  const { isLoggedIn, token, usertype, moderatorStatus, logout, changePasswordNeeded, username } = useAuth();
+  const location = useLocation();
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [pendingReviewCount, setPendingReviewCount] = useState(0);
+  const { userCredit, loading, error } = useUserCredit(username); // Correct destructuring
+  const { frontendConfig } = useFrontendConfig();
+  const isModeratorMode = frontendConfig?.game?.mode === 'moderator';
+  const isActiveModerator = usertype === 'MODERATOR' && moderatorStatus === 'active';
+  const isSuspendedModerator = usertype === 'MODERATOR' && moderatorStatus === 'suspended';
+  const canCreateMarket = isLoggedIn && usertype !== 'ADMIN' && !changePasswordNeeded && !isSuspendedModerator && (!isModeratorMode || isActiveModerator);
+  const reviewPageOwnsCounts = usertype === 'ADMIN' && (
+    location.pathname === '/admin' || location.pathname.startsWith('/admin/markets')
+  );
+
+  const toggleSidebar = () => setIsSidebarOpen(!isSidebarOpen);
+
+  const renderCredit = () => {
+    if (loading) return <p>Loading...</p>;  // Check usage here
+    if (error) return <p>Error: {error}</p>;
+    if (userCredit !== null) return <p>🪙 {userCredit}</p>;
+    return <p>No credit information available</p>;
+  };
+
+  useEffect(() => {
+    const handleOutsideClick = (event) => {
+      if (
+        !document.getElementById('sidebar').contains(event.target) &&
+        isSidebarOpen
+      ) {
+        setIsSidebarOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isSidebarOpen]);
+
+  useEffect(() => {
+    const handleReviewCounts = (event) => {
+      setPendingReviewCount(totalPendingReviewCount(event.detail));
+    };
+    window.addEventListener('socialpredict:admin-review-counts', handleReviewCounts);
+    return () => {
+      window.removeEventListener('socialpredict:admin-review-counts', handleReviewCounts);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (reviewPageOwnsCounts) {
+      return undefined;
+    }
+    if (!isLoggedIn || usertype !== 'ADMIN' || !token || changePasswordNeeded) {
+      setPendingReviewCount(0);
+      return undefined;
+    }
+
+    let ignore = false;
+    const loadPendingWork = async () => {
+      try {
+        const counts = await getPendingAdminReviewCounts({ token });
+        if (ignore) return;
+        setPendingReviewCount(totalPendingReviewCount(counts));
+      } catch {
+        if (!ignore) {
+          setPendingReviewCount(0);
+        }
+      }
+    };
+
+    loadPendingWork();
+    const intervalId = window.setInterval(loadPendingWork, 60000);
+    return () => {
+      ignore = true;
+      window.clearInterval(intervalId);
+    };
+  }, [isLoggedIn, usertype, token, changePasswordNeeded, reviewPageOwnsCounts]);
+
+  const handleLogoutClick = () => {
+    logout();
+    setIsSidebarOpen(false);
+  };
+
+  const renderLinks = () => {
+    if (!isLoggedIn) {
+      return (
+        <>
+          <SidebarLink to='/' icon={HomeSVG}>
+            Home
+          </SidebarLink>
+          <li>
+            <LoginModalButton />
+          </li>
+          <SidebarLink to='/markets' icon={MarketsSVG}>
+            Markets
+          </SidebarLink>
+          <SidebarLink to='/about' icon={AboutSVG}>
+            About
+          </SidebarLink>
+          <SidebarLink to='/stats' icon={StatsSVG}>
+            Stats
+          </SidebarLink>
+        </>
+      );
+    }
+
+    if (usertype === 'ADMIN') {
+      return (
+        <>
+          <SidebarLink to='/admin/markets/review' icon={AdminGearSVG} badge={pendingReviewCount}>
+            Review Markets
+          </SidebarLink>
+          <SidebarLink to='/admin/users' icon={ProfileSVG}>
+            User Governance
+          </SidebarLink>
+          <SidebarLink to='/admin/cms' icon={AdminGearSVG}>
+            CMS
+          </SidebarLink>
+          <SidebarLink to='/markets' icon={MarketsSVG}>
+            Markets
+          </SidebarLink>
+          <SidebarLink to='/about' icon={AboutSVG}>
+            About
+          </SidebarLink>
+          <SidebarLink to='/stats' icon={StatsSVG}>
+            System Stats
+          </SidebarLink>
+          <SidebarLink to='/' icon={LogoutSVG} onClick={handleLogoutClick}>
+            Logout
+          </SidebarLink>
+        </>
+      );
+    }
+
+    if (changePasswordNeeded) {
+      return (
+        <>
+          <SidebarLink to='/changepassword' icon={LockPasswordSVG}>
+            Change Password
+          </SidebarLink>
+          <SidebarLink to='/' icon={LogoutSVG} onClick={handleLogoutClick}>
+            Logout
+          </SidebarLink>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <SidebarLink to='/profile' icon={CoinsSVG} >
+          {renderCredit()}
+        </SidebarLink>      
+        <SidebarLink to='/' icon={HomeSVG}>
+          Home
+        </SidebarLink>
+        <SidebarLink to='/profile' icon={ProfileSVG}>
+          Profile
+        </SidebarLink>
+        <SidebarLink to='/markets' icon={MarketsSVG}>
+          Markets
+        </SidebarLink>
+        {canCreateMarket && (
+          <SidebarLink to='/create' icon={CreateSVG}>
+            Create
+          </SidebarLink>
+        )}
+        {isActiveModerator && (
+          <SidebarLink to='/profile?tab=Markets' icon={AdminGearSVG}>
+            My Market Reviews
+          </SidebarLink>
+        )}
+        <SidebarLink to='/about' icon={AboutSVG}>
+          About
+        </SidebarLink>
+        <SidebarLink to='/stats' icon={StatsSVG}>
+          Stats
+        </SidebarLink>
+        <SidebarLink to='/' icon={LogoutSVG} onClick={handleLogoutClick}>
+          Logout
+        </SidebarLink>
+      </>
+    );
+  };
+
+  return (
+    <>
+      <aside
+        id='sidebar'
+        className={`fixed top-0 left-0 z-30 w-48 h-screen bg-gray-800 text-white flex flex-col transition-transform duration-300 ease-in-out ${
+          isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        } md:relative md:translate-x-0`}
+      >
+        <div className='flex items-center justify-between p-3 border-b border-gray-700'>
+          <h2 className='text-lg font-bold'>SocialPredict</h2>
+          <button
+            onClick={toggleSidebar}
+            className='md:hidden'
+            aria-label={isSidebarOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-expanded={isSidebarOpen}
+          >
+            {isSidebarOpen ? (
+              <MenuShrinkSVG className='w-5 h-5' />
+            ) : (
+              <MenuGrowSVG className='w-5 h-5' />
+            )}
+          </button>
+        </div>
+        <nav className='flex-grow overflow-y-auto px-2 py-3' aria-label='Primary navigation'>
+          <ul className='space-y-1'>{renderLinks()}</ul>
+        </nav>
+        <footer className='border-t border-gray-700 p-2'>
+          <p className='text-xs text-center'>📈 Built with SocialPredict</p>
+          <p className='text-xs text-center'>
+            <a
+              href='https://github.com/openpredictionmarkets/socialpredict'
+              target='_blank'
+              rel='noopener noreferrer'
+              className='text-blue-400 hover:text-blue-300'
+            >
+              ⭐ Star Us on Github!
+            </a>
+          </p>
+        </footer>
+      </aside>
+      {!isSidebarOpen && (
+        <div className='fixed bottom-0 left-0 right-0 z-50 bg-gray-800 text-white flex justify-around items-center p-2 md:hidden'>
+          <Link to='/' className='text-gray-300 hover:text-white' aria-label='Home'>
+            <HomeSVG className='w-5 h-5' />
+          </Link>
+          <Link to='/markets' className='text-gray-300 hover:text-white' aria-label='Markets'>
+            <MarketsSVG className='w-5 h-5' />
+          </Link>
+          {canCreateMarket ? (
+            <Link to='/create' className='text-gray-300 hover:text-white' aria-label='Create market'>
+              <CreateSVG className='w-5 h-5' />
+            </Link>
+          ) : !isLoggedIn ? (
+            <LoginModalButton iconOnly={true} />
+          ) : null}
+          {isLoggedIn && (
+            <Link to='/profile' className='text-gray-300 hover:text-white' aria-label='Profile'>
+              <ProfileSVG className='w-5 h-5' />
+            </Link>
+          )}
+          <button
+            onClick={toggleSidebar}
+            className='text-gray-300 hover:text-white'
+            aria-label='Open navigation menu'
+            aria-expanded={isSidebarOpen}
+          >
+            <MenuGrowSVG className='w-5 h-5' />
+          </button>
+        </div>
+      )}
+    </>
+  );
+};
+
+export default Sidebar;

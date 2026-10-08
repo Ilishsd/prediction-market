@@ -1,0 +1,60 @@
+import { API_URL } from '../../../config';
+import { getApiErrorMessage, parseApiResponseText } from '../../../utils/apiResponse';
+
+export const resolveMarket = (marketId, token, selectedResolution) => {
+    const resolutionData = {
+        resolution: selectedResolution,
+    };
+
+    const requestOptions = {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(resolutionData),
+    };
+
+    // Returning fetch promise to allow handling of the response in the component
+    return fetch(`${API_URL}/v0/markets/${marketId}/resolve`, requestOptions)
+        .then(async response => {
+            if (!response.ok) {
+                const payload = parseApiResponseText(await response.text());
+                throw new Error(getApiErrorMessage(response, payload, 'Failed to resolve market.'));
+            }
+            if (response.status === 204) {
+                return {};
+            }
+            return response.json();
+        })
+        .then(data => {
+            return data;
+        })
+        .catch(error => {
+            throw error;
+        });
+};
+
+export const resolveMarketGroup = (groupId, token, resolutionData) => {
+    const requestOptions = {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(resolutionData),
+    };
+
+    return fetch(`${API_URL}/v0/market-groups/${groupId}/resolve`, requestOptions)
+        .then(async response => {
+            if (!response.ok) {
+                const payload = parseApiResponseText(await response.text());
+                throw new Error(getApiErrorMessage(response, payload, 'Failed to resolve grouped market.'));
+            }
+            return response.json();
+        })
+        .then(data => data)
+        .catch(error => {
+            throw error;
+        });
+};

@@ -1,0 +1,254 @@
+import React, { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import MarketTagChips from '../../markets/MarketTagChips';
+
+const formatDate = (value) => {
+  if (!value) return 'n/a';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'n/a';
+  return date.toLocaleString();
+};
+
+const statusLabel = (market) => market.lifecycleStatus || market.status || 'unknown';
+
+const marketLabel = (value, fallback) => {
+  const label = String(value || '').trim();
+  return label || fallback;
+};
+
+const uniqueTagsBySlug = (markets = []) => {
+  const seen = new Set();
+  const tags = [];
+  markets.forEach((market) => {
+    (market.tags || []).forEach((tag) => {
+      const key = tag.slug || tag.id || tag.displayName;
+      if (!key || seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      tags.push(tag);
+    });
+  });
+  return tags;
+};
+
+export const groupLifecycleMarketRows = (markets = []) => {
+  const rows = [];
+  const groups = new Map();
+
+  markets.forEach((market) => {
+    if (market.isMarketGroup && market.marketGroup?.id) {
+      rows.push({
+        ...market,
+        rowKey: market.rowKey || `group:${market.marketGroup.id}`,
+        tags: market.tags?.length ? market.tags : uniqueTagsBySlug(market.childMarkets || []),
+      });
+      return;
+    }
+
+    const group = market.marketGroup;
+    if (!group?.id) {
+      rows.push({ ...market, rowKey: `market:${market.id}` });
+      return;
+    }
+
+    const existing = groups.get(group.id);
+    if (!existing) {
+      const row = {
+        ...market,
+        id: group.id,
+        rowKey: `group:${group.id}`,
+        isMarketGroup: true,
+        questionTitle: group.questionTitle || market.questionTitle,
+        description: group.description || '',
+        creatorUsername: group.creatorUsername || market.creatorUsername,
+        stewardUsername: group.stewardUsername || market.stewardUsername || market.creatorUsername,
+        lifecycleStatus: group.lifecycleStatus || market.lifecycleStatus,
+        status: group.status || market.status,
+        proposalCost: group.proposalCost ?? market.proposalCost,
+        approvedBy: group.approvedBy ?? market.approvedBy,
+        approvedAt: group.approvedAt ?? market.approvedAt,
+        rejectedBy: group.rejectedBy ?? market.rejectedBy,
+        rejectedAt: group.rejectedAt ?? market.rejectedAt,
+        rejectionReason: group.rejectionReason ?? market.rejectionReason,
+        createdAt: group.createdAt || market.createdAt,
+        updatedAt: group.updatedAt || market.updatedAt,
+        marketGroup: group,
+        childMarkets: [market],
+        tags: uniqueTagsBySlug([market]),
+      };
+      groups.set(group.id, row);
+      rows.push(row);
+      return;
+    }
+
+    existing.childMarkets.push(market);
+    existing.childMarkets.sort((left, right) => {
+      const leftOrder = Number(left.marketGroup?.displayOrder ?? left.id ?? 0);
+      const rightOrder = Number(right.marketGroup?.displayOrder ?? right.id ?? 0);
+      return leftOrder - rightOrder;
+    });
+    existing.tags = uniqueTagsBySlug(existing.childMarkets);
+  });
+
+  return rows;
+};
+
+const MarketLabels = ({ market }) => (
+  <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+    <div className="rounded-md border border-emerald-700/70 bg-emerald-950/40 px-3 py-2">
+      <div className="font-mono uppercase tracking-[0.16em] text-emerald-300">YES label</div>
+      <div className="mt-1 break-words font-semibold text-emerald-50">{marketLabel(market.yesLabel, 'YES')}</div>
+    </div>
+    <div className="rounded-md border border-rose-700/70 bg-rose-950/40 px-3 py-2">
+      <div className="font-mono uppercase tracking-[0.16em] text-rose-300">NO label</div>
+      <div className="mt-1 break-words font-semibold text-rose-50">{marketLabel(market.noLabel, 'NO')}</div>
+    </div>
+  </div>
+);
+
+const MarketGroupChildren = ({ market }) => {
+  const children = Array.isArray(market.childMarkets) ? market.childMarkets : [];
+  if (!market.isMarketGroup) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 rounded-md border border-sky-800/60 bg-sky-950/20 px-3 py-2 text-xs text-sky-100">
+      <div className="font-mono uppercase tracking-[0.14em] text-sky-200">
+        Grouped market · {children.length || market.marketGroup?.answerCount || 0} answers
+      </div>
+      {children.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {children.map((child) => (
+            <span key={child.id} className="rounded-full border border-sky-800/70 bg-sky-900/40 px-2.5 py-1">
+              {child.marketGroup?.answerLabel || child.questionTitle || `Market #${child.id}`} · #{child.id}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const StewardshipAuditTrail = ({ audits = [] }) => {
+  if (!audits.length) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      {audits.map((audit, index) => (
+        <div key={audit.id || `${audit.createdAt || 'audit'}-${index}`} className="rounded-md border border-info-blue/30 bg-info-blue/10 px-3 py-2">
+          <div>
+            Steward reassigned from {audit.fromStewardUsername || 'n/a'} to {audit.toStewardUsername || 'n/a'}
+            {audit.actorUsername ? ` by ${audit.actorUsername}` : ''}
+            {audit.createdAt ? ` at ${formatDate(audit.createdAt)}` : ''}
+          </div>
+          {audit.reason && <div className="mt-1 text-info-blue">Reason: {audit.reason}</div>}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const MarketLifecycleTable = ({ markets = [], emptyMessage, showCreator = false, showSteward = false, actions }) => {
+  const [expandedDescriptions, setExpandedDescriptions] = useState({});
+  const displayMarkets = useMemo(() => groupLifecycleMarketRows(markets), [markets]);
+
+  const toggleDescription = (marketId) => {
+    setExpandedDescriptions((current) => ({
+      ...current,
+      [marketId]: !current[marketId],
+    }));
+  };
+
+  if (!displayMarkets.length) {
+    return (
+      <div className="rounded-lg border border-gray-700 bg-gray-900/70 p-6 text-center text-gray-300">
+        {emptyMessage || 'No markets found.'}
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-gray-700 bg-gray-900/60">
+      <table className="min-w-full divide-y divide-gray-700 text-sm">
+        <thead className="bg-gray-800 text-xs uppercase tracking-wide text-gray-300">
+          <tr>
+            <th className="px-4 py-3 text-left">Market</th>
+            {showCreator && <th className="px-4 py-3 text-left">Creator</th>}
+            {showSteward && <th className="px-4 py-3 text-left">Steward</th>}
+            <th className="px-4 py-3 text-left">Status</th>
+            <th className="px-4 py-3 text-left">Created</th>
+            <th className="px-4 py-3 text-left">Review Trail</th>
+            {actions && <th className="px-4 py-3 text-left">Actions</th>}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-800 text-gray-100">
+          {displayMarkets.map((market) => {
+            const rowKey = market.rowKey || market.id;
+            const firstChildId = market.childMarkets?.[0]?.id;
+            const viewMarketId = market.isMarketGroup ? firstChildId : market.id;
+
+            return (
+            <tr key={rowKey} className="align-top">
+              <td className="px-4 py-4">
+                <div className="font-semibold text-white">{market.questionTitle}</div>
+                <div className="mt-1 font-mono text-xs text-gray-400">
+                  {market.isMarketGroup ? `Group ID: ${market.marketGroup?.id || market.id}` : `ID: ${market.id}`}
+                </div>
+                {market.description && (
+                  <div className="mt-2 max-w-xl text-xs text-gray-300">
+                    <div className={expandedDescriptions[rowKey] ? 'whitespace-pre-wrap break-words' : 'line-clamp-2 break-words'}>
+                      {market.description}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleDescription(rowKey)}
+                      className="mt-2 text-primary-pink hover:underline"
+                    >
+                      {expandedDescriptions[rowKey] ? 'Show less description' : 'Show full description'}
+                    </button>
+                  </div>
+                )}
+                <MarketTagChips tags={market.tags || []} className="mt-3" />
+                <MarketGroupChildren market={market} />
+                {!market.isMarketGroup && <MarketLabels market={market} />}
+                {statusLabel(market) === 'published' && viewMarketId && (
+                  <Link className="mt-2 inline-block text-primary-pink hover:underline" to={`/markets/${viewMarketId}`}>
+                    {market.isMarketGroup ? 'View grouped market' : 'View market'}
+                  </Link>
+                )}
+              </td>
+              {showCreator && (
+                <td className="px-4 py-4 font-mono text-gray-300">{market.creatorUsername || 'n/a'}</td>
+              )}
+              {showSteward && (
+                <td className="px-4 py-4 font-mono text-gray-300">{market.stewardUsername || market.creatorUsername || 'n/a'}</td>
+              )}
+              <td className="px-4 py-4">
+                <span className="rounded-full bg-gray-700 px-3 py-1 font-mono text-xs text-white">
+                  {statusLabel(market)}
+                </span>
+              </td>
+              <td className="px-4 py-4 text-gray-300">{formatDate(market.createdAt)}</td>
+              <td className="px-4 py-4 text-xs text-gray-300">
+                {market.proposalCost > 0 && <div>Proposal cost: {market.proposalCost} credits</div>}
+                {market.approvedBy && <div>Approved by {market.approvedBy} at {formatDate(market.approvedAt)}</div>}
+                {market.rejectedBy && <div>Rejected by {market.rejectedBy} at {formatDate(market.rejectedAt)}</div>}
+                {market.rejectionReason && <div className="mt-1 text-rose-200">Reason: {market.rejectionReason}</div>}
+                <StewardshipAuditTrail audits={market.stewardshipAudits || []} />
+                {!market.approvedBy && !market.rejectedBy && !(market.stewardshipAudits || []).length && <span className="text-gray-500">Awaiting admin review</span>}
+              </td>
+              {actions && <td className="px-4 py-4">{actions(market)}</td>}
+            </tr>
+          );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+export default MarketLifecycleTable;
