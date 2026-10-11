@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { searchMarkets } from '../../api/marketsApi';
 
 const GlobalSearchBar = ({
@@ -7,26 +7,30 @@ const GlobalSearchBar = ({
     isSearching,
     setIsSearching,
     tagSlug = '',
+    externalQuery,
+    hideInput = false,
+    onClear,
 }) => {
-    const [query, setQuery] = useState('');
+    const [query, setQuery] = useState(externalQuery || '');
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
-        const timeoutId = setTimeout(() => {
-            const trimmed = query.trim();
+        if (externalQuery !== undefined) {
+            setQuery(externalQuery);
+        }
+    }, [externalQuery]);
 
-            if (!trimmed) {
+    useEffect(() => {
+        const timeoutId = setTimeout(() => {
+            if (query.trim().length > 0) {
+                performSearch(query.trim());
+            } else {
                 onSearchResults(null);
                 setIsSearching(false);
-                return;
             }
-
-            performSearch(trimmed);
         }, 300);
 
         return () => clearTimeout(timeoutId);
-        // Search is intentionally re-run when status/tag changes.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [query, currentStatus, tagSlug]);
 
     const performSearch = async (searchQuery) => {
@@ -38,7 +42,7 @@ const GlobalSearchBar = ({
             onSearchResults(results);
         } catch (error) {
             console.error('Search error:', error);
-            onSearchResults({ error: 'Search failed. Please try again.' });
+            onSearchResults({ error: 'جستجو انجام نشد. دوباره تلاش کنید.' });
         } finally {
             setLoading(false);
         }
@@ -48,50 +52,48 @@ const GlobalSearchBar = ({
         setQuery('');
         onSearchResults(null);
         setIsSearching(false);
+        if (onClear) onClear();
     };
 
     return (
         <div className="w-full">
-            <div className={`flex items-center gap-3 rounded-2xl border bg-white px-4 py-2.5 shadow-sm transition ${
-                isSearching ? 'border-gray-400 shadow-md' : 'border-gray-200 hover:border-gray-300'
-            }`}>
-                <span className="shrink-0 text-lg text-gray-400" aria-hidden="true">âŒ•</span>
-
-                <input
-                    type="text"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Search markets"
-                    aria-label="Search markets"
-                    className="min-w-0 flex-1 bg-transparent text-sm text-gray-900 outline-none placeholder:text-gray-400"
-                />
-
-                {loading && (
-                    <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-gray-200 border-t-gray-900" aria-label="Searching" />
-                )}
-
-                {!loading && query && (
+            {!hideInput && (
+                <div className="relative mb-4">
+                    <input
+                        type="text"
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="جستجوی بازارها"
+                        className="w-full rounded-full border border-transparent bg-slate-100 py-3 pl-10 pr-11 text-sm text-slate-900 placeholder-slate-500 outline-none transition focus:border-slate-300 focus:bg-white"
+                    />
+                    {query && (
+                        <button
+                            type="button"
+                            onClick={handleClear}
+                            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-900"
+                            title="پاک کردن"
+                        >
+                            ✕
+                        </button>
+                    )}
+                </div>
+            )}
+            {isSearching && query && (
+                <div className="mb-3 flex items-center gap-3 py-2 text-sm text-slate-500">
+                    <span>
+                        نتایج جستجو برای <span className="font-semibold text-slate-900">«{query}»</span>
+                        {tagSlug ? <> در برچسب <span className="font-semibold text-emerald-600">{tagSlug}</span></> : null}
+                    </span>
+                    {loading && (
+                        <span className="h-4 w-4 animate-spin rounded-full border-b-2 border-slate-500" />
+                    )}
                     <button
                         type="button"
                         onClick={handleClear}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-900"
-                        title="Clear search"
-                        aria-label="Clear search"
+                        className="text-xs font-semibold text-blue-600 hover:text-blue-700"
                     >
-                        Ã—
+                        پاک کردن
                     </button>
-                )}
-
-                <span className="hidden shrink-0 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-semibold text-gray-400 sm:inline-flex">
-                    /
-                </span>
-            </div>
-
-            {isSearching && query && (
-                <div className="mt-2 px-1 text-xs text-gray-500">
-                    Searching <span className="font-semibold text-gray-900">{currentStatus}</span> markets
-                    {tagSlug ? <> in <span className="font-semibold text-gray-900">{tagSlug}</span></> : null}
-                    {' '}for <span className="font-semibold text-gray-900">â€œ{query}â€</span>
                 </div>
             )}
         </div>
